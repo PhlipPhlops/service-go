@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -36,12 +37,10 @@ func loadedBuilder(t *testing.T) (*gobuilder.Builder, context.Context) {
 
 	svc := goservice.New(agent)
 	b := gobuilder.New(svc, gobuilder.BuildConfig{
-		FactoryFS:     factoryFS,
-		BuilderFS:     builderFS,
-		DeploymentFS:  deploymentFS,
-		Requirements:  requirements,
-		GoVersion:     GoVersion,
-		AlpineVersion: AlpineVersion,
+		FactoryFS:    factoryFS,
+		BuilderFS:    builderFS,
+		DeploymentFS: deploymentFS,
+		Requirements: requirements,
 	})
 
 	ctx := context.Background()
@@ -111,6 +110,26 @@ func TestBuildEmitsRecipePlan(t *testing.T) {
 	dockerfile, err := os.ReadFile(filepath.Join(out, "builder", "Dockerfile"))
 	if err != nil {
 		t.Fatalf("read Dockerfile: %v", err)
+	}
+	// Dependabot must see the exact versioned images that the recipe uses.
+	// Template variables in FROM lines leave the updater with no dependencies.
+	source, err := builderFS.ReadFile("templates/builder/Dockerfile.tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := regexp.MustCompile(`(?m)^FROM (?:--platform=\S+ )?(\S+)`)
+	images := from.FindAllStringSubmatch(string(source), -1)
+	if len(images) != 2 {
+		t.Fatalf("expected two base images, got %v", images)
+	}
+	literal := regexp.MustCompile(`^(golang|alpine):[0-9][a-zA-Z0-9_.-]*$`)
+	for _, image := range images {
+		if !literal.MatchString(image[1]) {
+			t.Errorf("base image %q is not a literal version Dependabot can update", image[1])
+		}
+		if !strings.Contains(string(dockerfile), image[0]+"\n") && !strings.Contains(string(dockerfile), image[0]+" AS ") {
+			t.Errorf("rendered Dockerfile does not preserve base image %q", image[1])
+		}
 	}
 	// The recipe declares two architectures, so the Dockerfile must build for
 	// the target platform rather than a hardcoded GOARCH.

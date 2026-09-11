@@ -38,12 +38,6 @@ var requirements = builders.NewDependencies(agent.Name,
 	builders.NewDependency("code").WithPathSelect(shared.NewSelect("*.go")),
 )
 
-// Go and Alpine versions used by the default container build.
-const (
-	GoVersion     = "1.26"
-	AlpineVersion = "3.21"
-)
-
 func main() {
 	svc := goservice.New(agent)
 	code := gocode.New(svc)
@@ -53,12 +47,10 @@ func main() {
 		Agent:   svc,
 		Runtime: rt,
 		Builder: gobuilder.New(svc, gobuilder.BuildConfig{
-			FactoryFS:     factoryFS,
-			BuilderFS:     builderFS,
-			DeploymentFS:  deploymentFS,
-			Requirements:  requirements,
-			GoVersion:     GoVersion,
-			AlpineVersion: AlpineVersion,
+			FactoryFS:    factoryFS,
+			BuilderFS:    builderFS,
+			DeploymentFS: deploymentFS,
+			Requirements: requirements,
 		}),
 		Code:    code,
 		Tooling: tooling,
