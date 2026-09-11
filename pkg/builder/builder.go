@@ -124,6 +124,10 @@ func (s *Builder) Sync(ctx context.Context, _ *builderv0.SyncRequest) (*builderv
 	return s.Builder.SyncResponse()
 }
 
+func (s *Builder) BuildCapabilities(context.Context, *builderv0.BuildCapabilitiesRequest) (*builderv0.BuildCapabilitiesResponse, error) {
+	return &builderv0.BuildCapabilitiesResponse{BuildxSelection: true}, nil
+}
+
 // Build produces a Docker image. When the CLI supplies an output directory it
 // owns the docker build: the agent renders the recipe (Dockerfile + context)
 // into that directory and returns a DockerBuildPlan the CLI builds multi-arch

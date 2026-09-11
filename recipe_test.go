@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codefly-dev/core/agents/services"
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
@@ -14,6 +18,9 @@ import (
 
 	gobuilder "github.com/codefly-dev/service-go/pkg/builder"
 	goservice "github.com/codefly-dev/service-go/pkg/service"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/proto"
 )
 
 const serviceConfig = `kind: service
@@ -176,5 +183,150 @@ func write(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func grpcBuilderClient(t *testing.T, b *gobuilder.Builder, options ...grpc.ServerOption) *services.BuilderAgent {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer(options...)
+	builderv0.RegisterBuilderServer(server, b)
+	go func() {
+		if err := server.Serve(listener); err != nil {
+			t.Errorf("serve builder: %v", err)
+		}
+	}()
+	t.Cleanup(server.Stop)
+	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return services.NewBuilderAgentClient(conn)
+}
+
+func TestBuildCapabilitiesBeforeLoad(t *testing.T) {
+	b := gobuilder.New(goservice.New(agent), gobuilder.BuildConfig{})
+	client := grpcBuilderClient(t, b)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	response, err := client.BuildCapabilities(ctx, &builderv0.BuildCapabilitiesRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.GetBuildxSelection() {
+		t.Fatal("Buildx selection must be supported before Load")
+	}
+}
+
+func TestBuildxRecipeOverGRPC(t *testing.T) {
+	for _, cached := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cache=%t", cached), func(t *testing.T) {
+			b, _ := loadedBuilder(t)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			out := filepath.Join(t.TempDir(), "recipe")
+			docker := &builderv0.DockerBuildContext{DockerRepository: "registry.example.com", BuildxBuilder: "caller-owned-builder"}
+			if cached {
+				docker.Cache = &builderv0.BuildCacheOptions{Backend: "registry", Scope: "test/myservice", Imports: []string{"registry.example.com/cache"}, Exports: []string{"registry.example.com/cache"}}
+			}
+			request := &builderv0.BuildRequest{OutputDirectory: out, BuildContext: &builderv0.BuildContext{Kind: &builderv0.BuildContext_DockerBuildContext{DockerBuildContext: docker}}}
+			calls := make(chan string, 2)
+			client := grpcBuilderClient(t, b, grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+				calls <- info.FullMethod
+				if info.FullMethod == builderv0.Builder_BuildCapabilities_FullMethodName {
+					if _, err := os.Stat(out); !os.IsNotExist(err) {
+						t.Errorf("capability negotiation prepared recipe output: %v", err)
+					}
+				}
+				if build, ok := req.(*builderv0.BuildRequest); ok && !proto.Equal(build, request) {
+					t.Errorf("Build request changed in transit: %v", build)
+				}
+				return handler(ctx, req)
+			}))
+			response, err := client.Build(ctx, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.GetState().GetState() != builderv0.BuildStatus_SUCCESS {
+				t.Fatalf("Build failed: %v", response.GetState())
+			}
+			for _, want := range []string{builderv0.Builder_BuildCapabilities_FullMethodName, builderv0.Builder_Build_FullMethodName} {
+				select {
+				case got := <-calls:
+					if got != want {
+						t.Errorf("RPC = %q, want %q", got, want)
+					}
+				default:
+					t.Fatalf("missing RPC %s", want)
+				}
+			}
+			plan := response.GetResult().GetDockerBuildPlan()
+			if plan == nil {
+				t.Fatal("missing recipe plan")
+			}
+			if err := services.VerifyDockerBuildPlan(out, plan); err != nil {
+				t.Fatal(err)
+			}
+			if response.GetBuildxBuilder() != "" || response.GetCacheContractVersion() != "" {
+				t.Fatal("recipe must leave execution acknowledgement to the caller")
+			}
+		})
+	}
+}
+
+func TestLegacyBuildxOverGRPC(t *testing.T) {
+	if os.Getenv("CODEFLY_TEST_BUILDX") != "1" {
+		t.Skip("set CODEFLY_TEST_BUILDX=1 to build with Docker")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
+	defer cancel()
+	run := func(ctx context.Context, args ...string) string {
+		t.Helper()
+		output, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("docker %v: %v\n%s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	name := fmt.Sprintf("codefly-go-test-%d", time.Now().UnixNano())
+	run(ctx, "buildx", "create", "--name", name, "--driver", "docker-container", "--bootstrap")
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), time.Minute)
+		defer stop()
+		run(cleanup, "buildx", "rm", name)
+	})
+	t.Setenv("BUILDX_BUILDER", "must-not-use-ambient-builder")
+	t.Setenv("CODEFLY_BUILD_PLATFORM", "linux/amd64")
+	b, _ := loadedBuilder(t)
+	client := grpcBuilderClient(t, b)
+	response, err := client.Build(ctx, &builderv0.BuildRequest{BuildContext: &builderv0.BuildContext{Kind: &builderv0.BuildContext_DockerBuildContext{DockerBuildContext: &builderv0.DockerBuildContext{DockerRepository: name, BuildxBuilder: name}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetState().GetState() != builderv0.BuildStatus_SUCCESS {
+		t.Fatalf("Build failed: %v", response.GetState())
+	}
+	if response.GetResult().GetDockerBuildPlan() != nil {
+		t.Fatal("legacy build returned a recipe")
+	}
+	if response.GetBuildxBuilder() != name {
+		t.Fatalf("builder acknowledgement = %q, want %q", response.GetBuildxBuilder(), name)
+	}
+	image := b.Base.DockerImage(&builderv0.DockerBuildContext{DockerRepository: name}).FullName()
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), time.Minute)
+		defer stop()
+		run(cleanup, "image", "rm", image)
+	})
+	if got := run(ctx, "image", "inspect", "--format", "{{.Architecture}}", image); got != "amd64" {
+		t.Fatalf("image architecture = %q, want amd64", got)
 	}
 }
