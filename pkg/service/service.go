@@ -117,10 +117,11 @@ func (s *Service) GetAgentInformation(_ context.Context, _ *agentv0.AgentInforma
 			Nix:    true,
 			Docker: true,
 		},
-		Toolchains: []agentv0.Toolchain_Type{agentv0.Toolchain_GO},
-		Languages:  []agentv0.Language_Type{agentv0.Language_GO},
-		ReadMe:     "Generic Go service. Specializations add protocols.",
-		Validation: ValidationCapabilities(),
+		Toolchains:              []agentv0.Toolchain_Type{agentv0.Toolchain_GO},
+		Languages:               []agentv0.Language_Type{agentv0.Language_GO},
+		ReadMe:                  "Generic Go service. Specializations add protocols.",
+		Validation:              ValidationCapabilities(),
+		EffectiveInputsVersions: []uint32{1},
 	}.Build(), nil
 }
 
