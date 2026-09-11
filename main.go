@@ -40,6 +40,7 @@ var requirements = builders.NewDependencies(agent.Name,
 
 func main() {
 	svc := goservice.New(agent)
+	svc.InputPlans = goservice.GenericGoInputPlans
 	code := gocode.New(svc)
 	rt := goruntime.New(svc)
 	tooling := gotooling.New(code, rt)

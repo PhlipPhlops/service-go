@@ -4,16 +4,23 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	goruntime "github.com/codefly-dev/service-go/pkg/runtime"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/ciinputs"
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	agent "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
+	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"github.com/codefly-dev/core/resources"
+	gobuilder "github.com/codefly-dev/service-go/pkg/builder"
 	goservice "github.com/codefly-dev/service-go/pkg/service"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -348,6 +355,35 @@ func TestEffectiveInputsSuiteContextAndCompatibility(t *testing.T) {
 		{Name: "unit", DependencyMode: agent.TestDependencyMode_TEST_DEPENDENCY_MODE_START_DEPENDENCIES},
 		{Name: "pure", DependencyMode: agent.TestDependencyMode_TEST_DEPENDENCY_MODE_NONE},
 	}
+	svc.InputPlans = func(_ context.Context, req *agent.GetEffectiveInputsRequest) (map[ciinputs.Key]goservice.EffectiveInputPlan, error) {
+		keys, err := ciinputs.Required(validation)
+		if err != nil {
+			return nil, err
+		}
+		plans := map[ciinputs.Key]goservice.EffectiveInputPlan{}
+		for _, key := range keys {
+			plan := goservice.EffectiveInputPlan{}
+			for _, in := range req.Context {
+				consumed := key.Phase != agent.TaskPhase_TASK_PHASE_SYNC || in.Kind == agent.EffectiveInputKind_EFFECTIVE_INPUT_KIND_PLUGIN || in.Kind == agent.EffectiveInputKind_EFFECTIVE_INPUT_KIND_TOOLCHAIN
+				switch in.Kind {
+				case agent.EffectiveInputKind_EFFECTIVE_INPUT_KIND_SERVICE_IMPLEMENTATION:
+					consumed = key.Suite == "unit"
+				case agent.EffectiveInputKind_EFFECTIVE_INPUT_KIND_FIXTURE:
+					consumed = key.Phase == agent.TaskPhase_TASK_PHASE_TEST
+				case agent.EffectiveInputKind_EFFECTIVE_INPUT_KIND_ARTIFACT, agent.EffectiveInputKind_EFFECTIVE_INPUT_KIND_VALIDATION:
+					consumed = key.Phase == agent.TaskPhase_TASK_PHASE_ARTIFACT_BUILD || key.Phase == agent.TaskPhase_TASK_PHASE_SOURCE_PACKAGE
+				}
+				if consumed {
+					plan.Inputs = append(plan.Inputs, in)
+				}
+			}
+			if key.Suite == "unit" {
+				plan.RuntimeServices = []string{"api", "database"}
+			}
+			plans[key] = plan
+		}
+		return plans, nil
+	}
 	client := inputClient(t, &inputSpecialization{Service: svc, validation: validation})
 	req := &agent.GetEffectiveInputsRequest{SchemaVersion: 1, Snapshot: "context"}
 	for _, kind := range []agent.EffectiveInputKind{
@@ -368,6 +404,13 @@ func TestEffectiveInputsSuiteContextAndCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, task := range before.Tasks {
+		expectedServices := ""
+		if task.Task.Suite == "unit" {
+			expectedServices = "api,database"
+		}
+		if strings.Join(task.RuntimeServices, ",") != expectedServices {
+			t.Fatalf("runtime closure for %v = %v", task.Task, task.RuntimeServices)
+		}
 		for _, supplied := range req.Context {
 			present := false
 			for _, in := range task.Inputs {
@@ -417,6 +460,7 @@ func TestEffectiveInputsSuiteContextAndCompatibility(t *testing.T) {
 		}
 	}
 	svc.Settings.WithWorkspace = true
+	svc.InputPlans = nil
 	unsupported := discoverInputs(t, inputClient(t, svc), "workspace")
 	for _, task := range unsupported.Tasks {
 		if task.Complete {
@@ -455,7 +499,7 @@ func TestEffectiveInputsConfigurationAndLockfileChanges(t *testing.T) {
 	if strings.Contains(after.String(), "rotated-secret") || strings.Contains(after.String(), "different-secret") {
 		t.Fatal("changed secret leaked")
 	}
-	req := &agent.GetEffectiveInputsRequest{SchemaVersion: 1, Snapshot: "toolchain", Context: []*agent.EffectiveInput{{Kind: agent.EffectiveInputKind_EFFECTIVE_INPUT_KIND_TOOLCHAIN, Owner: "runner", Name: "compiler", Identity: &agent.EffectiveIdentity{Kind: agent.EffectiveIdentityKind_EFFECTIVE_IDENTITY_KIND_VERSIONED, Namespace: "compiler/v1", Digest: "immutable-1"}}}}
+	req := &agent.GetEffectiveInputsRequest{SchemaVersion: 1, Snapshot: "toolchain", Context: []*agent.EffectiveInput{{Kind: agent.EffectiveInputKind_EFFECTIVE_INPUT_KIND_TOOLCHAIN, Owner: "go-discovery", Name: "execution-toolchain", Identity: &agent.EffectiveIdentity{Kind: agent.EffectiveIdentityKind_EFFECTIVE_IDENTITY_KIND_VERSIONED, Namespace: "compiler/v1", Digest: "immutable-1"}}}}
 	first, err := client.GetEffectiveInputs(t.Context(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -470,5 +514,297 @@ func TestEffectiveInputsConfigurationAndLockfileChanges(t *testing.T) {
 		if proto.Equal(task, second.Tasks[i]) {
 			t.Fatalf("toolchain change omitted from %v", task.Task)
 		}
+	}
+}
+
+func TestEffectiveInputsSecretAliases(t *testing.T) {
+	svc, root := inputService(t)
+	if err := os.Symlink("../configurations/local/app.secret.env", filepath.Join(root, "service/code/go.work.sum")); err != nil {
+		t.Fatal(err)
+	}
+	runNative(t, svc.CurrentSourceLocation(), "test", "./...")
+	response := discoverInputs(t, inputClient(t, svc), "secret-alias")
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte("TOKEN=low-entropy-secret\n")))
+	if strings.Contains(response.String(), digest) {
+		t.Fatal("alias exposed a plain secret digest")
+	}
+	found := false
+	for _, task := range response.Tasks {
+		for _, in := range task.Inputs {
+			if in.Name == "service/configurations/local/app.secret.env" {
+				found = true
+				if !in.Sensitive || in.Identity != nil {
+					t.Fatal("target sensitivity lost across input kinds")
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("secret target declaration missing")
+	}
+}
+
+func TestEffectiveInputsUnrepresentableFixturePaths(t *testing.T) {
+	svc, root := inputService(t)
+	for _, name := range []string{"windows\\path.txt", "line\nbreak.txt"} {
+		writeInput(t, root, "service/code/testdata/"+name, "fixture")
+	}
+	runNative(t, svc.CurrentSourceLocation(), "test", "./...")
+	response := discoverInputs(t, inputClient(t, svc), "unrepresentable-fixtures")
+	required, err := ciinputs.Required(goservice.ValidationCapabilities())
+	if err != nil {
+		t.Fatal(err)
+	}
+	evaluated, err := ciinputs.Evaluate(response, &agent.GetEffectiveInputsRequest{SchemaVersion: 1, Snapshot: response.Snapshot}, required)
+	if err != nil || len(evaluated) != len(required) {
+		t.Fatalf("valid project lost its inventory: %v", err)
+	}
+	unit := inputTask(t, response, agent.TaskPhase_TASK_PHASE_TEST)
+	found := false
+	for _, in := range unit.Inputs {
+		if in.Name == "unrepresentable-filesystem-path" && in.Identity == nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing unresolved fixture input")
+	}
+}
+
+func TestEffectiveInputsRuntimeLifecycle(t *testing.T) {
+	svc, root := inputService(t)
+	svc.Identity.RelativeToWorkspace = "service"
+	svc.Environment = &basev0.Environment{}
+	client := inputClient(t, svc)
+	before := inputTask(t, discoverInputs(t, client, "before-init"), agent.TaskPhase_TASK_PHASE_COMPILE)
+	rt := goruntime.New(svc)
+	initResponse, err := rt.Init(t.Context(), &runtimev0.InitRequest{RuntimeContext: resources.NewRuntimeContextNative()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := services.ValidateRuntimeInitResponse(initResponse); err != nil {
+		t.Fatal(err)
+	}
+	after := inputTask(t, discoverInputs(t, client, "after-init"), agent.TaskPhase_TASK_PHASE_COMPILE)
+	if pathInput(before, "service/code/main.go") == nil || pathInput(after, "service/code/main.go") == nil {
+		t.Fatal("initialization removed source dependencies")
+	}
+	writeInput(t, root, "service/code/feature.go", "//go:build feature\n\npackage main\nvar _ = missingFeatureSymbol\n")
+	svc.EnvironmentVariables.AddOverrides(map[string]string{"GOFLAGS": "-tags=feature"})
+	buildResponse, err := rt.Build(t.Context(), &runtimev0.BuildRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if buildResponse.GetStatus().GetState() != runtimev0.BuildStatus_ERROR || !strings.Contains(buildResponse.GetStatus().GetMessage(), "missingFeatureSymbol") {
+		t.Fatalf("runtime ignored injected build tag: %v", buildResponse)
+	}
+	tagged := inputTask(t, discoverInputs(t, client, "tagged"), agent.TaskPhase_TASK_PHASE_COMPILE)
+	if pathInput(tagged, "service/code/feature.go") == nil {
+		t.Fatal("discovery ignored injected build tag")
+	}
+	writeInput(t, root, "service/code/feature.go", "//go:build feature\n\npackage main\nconst Feature = true\n")
+	buildResponse, err = rt.Build(t.Context(), &runtimev0.BuildRequest{})
+	if err != nil || buildResponse.GetStatus().GetState() != runtimev0.BuildStatus_SUCCESS {
+		t.Fatalf("valid build: %v %v", buildResponse, err)
+	}
+}
+
+func TestEffectiveInputsLargeContextCancellation(t *testing.T) {
+	svc, _ := inputService(t)
+	svc.Settings.WithWorkspace = true
+	req := &agent.GetEffectiveInputsRequest{SchemaVersion: 1, Snapshot: "large-context"}
+	for i := 0; i < 3500; i++ {
+		req.Context = append(req.Context, &agent.EffectiveInput{Kind: agent.EffectiveInputKind_EFFECTIVE_INPUT_KIND_SOURCE, Owner: "workspace", Name: fmt.Sprintf("%04d-%s", i, strings.Repeat("p", 160)), Identity: &agent.EffectiveIdentity{Kind: agent.EffectiveIdentityKind_EFFECTIVE_IDENTITY_KIND_SHA256, Digest: strings.Repeat("0", 64)}})
+	}
+	svc.InputPlans = func(_ context.Context, req *agent.GetEffectiveInputsRequest) (map[ciinputs.Key]goservice.EffectiveInputPlan, error) {
+		return map[ciinputs.Key]goservice.EffectiveInputPlan{{Phase: agent.TaskPhase_TASK_PHASE_COMPILE}: {Inputs: req.Context}}, nil
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	timer := time.AfterFunc(100*time.Millisecond, cancel)
+	defer timer.Stop()
+	start := time.Now()
+	_, err := svc.GetEffectiveInputs(ctx, req)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("merge exceeded cancellation bound: %v", elapsed)
+	}
+	if ctx.Err() != nil && status.Code(err) != codes.Canceled {
+		t.Fatalf("canceled merge returned success: %v", err)
+	}
+	if ctx.Err() == nil && err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if _, err := svc.GetEffectiveInputs(ctx, req); status.Code(err) != codes.Canceled {
+		t.Fatalf("canceled request accepted: %v", err)
+	}
+}
+
+func TestEffectiveInputsGenericSyncCompleteness(t *testing.T) {
+	svc, root := inputService(t)
+	if err := svc.Base.HeadlessLoad(t.Context(), &basev0.ServiceIdentity{WorkspacePath: root, RelativeToWorkspace: "service", Name: "sample"}); err != nil {
+		t.Fatal(err)
+	}
+	builder := gobuilder.New(svc, gobuilder.BuildConfig{})
+	assertSync := func() {
+		response, err := builder.Sync(t.Context(), &builderv0.SyncRequest{})
+		if err != nil || response.GetState().GetState() != builderv0.SyncStatus_SUCCESS {
+			t.Fatalf("generic sync: %v %v", response, err)
+		}
+	}
+	assertSync()
+	svc.InputPlans = goservice.GenericGoInputPlans
+	client := inputClient(t, svc)
+	before := discoverInputs(t, client, "before")
+	required, err := ciinputs.Required(goservice.ValidationCapabilities())
+	if err != nil {
+		t.Fatal(err)
+	}
+	evaluate := func(response *agent.GetEffectiveInputsResponse) []ciinputs.Task {
+		tasks, err := ciinputs.Evaluate(response, &agent.GetEffectiveInputsRequest{SchemaVersion: 1, Snapshot: response.Snapshot}, required)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, task := range tasks {
+			if task.Key.Phase == agent.TaskPhase_TASK_PHASE_SYNC {
+				if task.Conservative || task.Identity == "" {
+					t.Fatal("closed no-op has no complete identity")
+				}
+			} else if !task.Conservative {
+				t.Fatal("native observation promoted to completeness")
+			}
+		}
+		return tasks
+	}
+	writeInput(t, root, "service/code/main_test.go", "package main\n")
+	after := discoverInputs(t, client, "after")
+	assertSync()
+	for _, key := range ciinputs.Changed(evaluate(before), evaluate(after)) {
+		if key.Phase == agent.TaskPhase_TASK_PHASE_SYNC {
+			t.Fatal("source edit invalidated source-independent sync")
+		}
+	}
+	svc.InputPlans = nil
+	if inputTask(t, discoverInputs(t, client, "specialization"), agent.TaskPhase_TASK_PHASE_SYNC).Complete {
+		t.Fatal("specialization inherited generic sync completeness")
+	}
+}
+
+func TestEffectiveInputPlansBindBuildTarget(t *testing.T) {
+	svc, root := inputService(t)
+	svc.Identity.RelativeToWorkspace = "service"
+	svc.Environment = &basev0.Environment{}
+	rt := goruntime.New(svc)
+	initResponse, err := rt.Init(t.Context(), &runtimev0.InitRequest{RuntimeContext: resources.NewRuntimeContextNative()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := services.ValidateRuntimeInitResponse(initResponse); err != nil {
+		t.Fatal(err)
+	}
+	writeInput(t, root, "service/code/other/other.go", "package other\nconst Other = true\n")
+	invocation, err := svc.GoBuildInvocation(t.Context(), ".", rt.RunnerEnvironment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.InputPlans = func(context.Context, *agent.GetEffectiveInputsRequest) (map[ciinputs.Key]goservice.EffectiveInputPlan, error) {
+		return map[ciinputs.Key]goservice.EffectiveInputPlan{{Phase: agent.TaskPhase_TASK_PHASE_COMPILE}: {Invocation: invocation}}, nil
+	}
+	if output, err := invocation.Build(t.Context()); err != nil {
+		t.Fatalf("build: %v: %s", err, output)
+	}
+	compile := inputTask(t, discoverInputs(t, inputClient(t, svc), "targeted"), agent.TaskPhase_TASK_PHASE_COMPILE)
+	if pathInput(compile, "service/code/main.go") == nil || pathInput(compile, "service/code/other/other.go") != nil {
+		t.Fatal("discovery did not use the execution target")
+	}
+}
+
+func TestEffectiveInputPlansSelectExactContext(t *testing.T) {
+	svc, _ := inputService(t)
+	req := &agent.GetEffectiveInputsRequest{SchemaVersion: 1, Snapshot: "owned-inputs"}
+	for _, name := range []string{"consumed", "unrelated"} {
+		req.Context = append(req.Context, &agent.EffectiveInput{Kind: agent.EffectiveInputKind_EFFECTIVE_INPUT_KIND_LIBRARY, Owner: "shared", Name: name, Identity: &agent.EffectiveIdentity{Kind: agent.EffectiveIdentityKind_EFFECTIVE_IDENTITY_KIND_SHA256, Digest: strings.Repeat("1", 64)}})
+	}
+	svc.InputPlans = func(_ context.Context, req *agent.GetEffectiveInputsRequest) (map[ciinputs.Key]goservice.EffectiveInputPlan, error) {
+		return map[ciinputs.Key]goservice.EffectiveInputPlan{{Phase: agent.TaskPhase_TASK_PHASE_COMPILE}: {Inputs: req.Context[:1]}}, nil
+	}
+	client := inputClient(t, svc)
+	before, err := client.GetEffectiveInputs(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Snapshot = "unrelated-change"
+	req.Context[1].Identity.Digest = strings.Repeat("2", 64)
+	after, err := client.GetEffectiveInputs(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !proto.Equal(inputTask(t, before, agent.TaskPhase_TASK_PHASE_COMPILE), inputTask(t, after, agent.TaskPhase_TASK_PHASE_COMPILE)) {
+		t.Fatal("unconsumed library affected compile declaration")
+	}
+	req.Context[0].Identity.Digest = strings.Repeat("3", 64)
+	changed, err := client.GetEffectiveInputs(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proto.Equal(inputTask(t, after, agent.TaskPhase_TASK_PHASE_COMPILE), inputTask(t, changed, agent.TaskPhase_TASK_PHASE_COMPILE)) {
+		t.Fatal("consumed library identity lost")
+	}
+}
+
+func TestEffectiveInputPlansCannotHideDiscoveryFailure(t *testing.T) {
+	svc, root := inputService(t)
+	writeInput(t, root, "service/code/main.go", "not valid go")
+	invocation, err := svc.GoInputInvocation(t.Context(), ".", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.InputPlans = func(context.Context, *agent.GetEffectiveInputsRequest) (map[ciinputs.Key]goservice.EffectiveInputPlan, error) {
+		return map[ciinputs.Key]goservice.EffectiveInputPlan{{Phase: agent.TaskPhase_TASK_PHASE_COMPILE}: {Invocation: invocation, Complete: true}}, nil
+	}
+	response := discoverInputs(t, inputClient(t, svc), "failed-discovery")
+	if inputTask(t, response, agent.TaskPhase_TASK_PHASE_COMPILE).Complete {
+		t.Fatal("failed discovery retained completion assertion")
+	}
+}
+
+func TestEffectiveInputsVendoredContent(t *testing.T) {
+	svc, _ := inputService(t)
+	runNative(t, svc.CurrentSourceLocation(), "mod", "vendor")
+	runNative(t, svc.CurrentSourceLocation(), "test", "./...")
+	compile := inputTask(t, discoverInputs(t, inputClient(t, svc), "vendor"), agent.TaskPhase_TASK_PHASE_COMPILE)
+	if pathInput(compile, "service/code/vendor/example.com/contest/lib.go") == nil {
+		t.Fatal("discovery bypassed the vendored production library")
+	}
+	if pathInput(compile, "contest/lib.go") != nil {
+		t.Fatal("discovery substituted the replacement source for vendor content")
+	}
+}
+
+func TestEffectiveInputPlanProtectedSource(t *testing.T) {
+	svc, root := inputService(t)
+	source, err := os.ReadFile(filepath.Join(root, "service/code/main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := ciinputs.Protect([]byte(strings.Repeat("k", 32)), "source/v1", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invocation, err := svc.GoInputInvocation(t.Context(), ".", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protected := &agent.EffectiveInput{Kind: agent.EffectiveInputKind_EFFECTIVE_INPUT_KIND_SOURCE, Owner: "workspace", Name: "service/code/main.go", Path: true, Mode: 0o100644, Sensitive: true, Identity: identity}
+	svc.InputPlans = func(context.Context, *agent.GetEffectiveInputsRequest) (map[ciinputs.Key]goservice.EffectiveInputPlan, error) {
+		return map[ciinputs.Key]goservice.EffectiveInputPlan{{Phase: agent.TaskPhase_TASK_PHASE_COMPILE}: {Invocation: invocation, Inputs: []*agent.EffectiveInput{protected}}}, nil
+	}
+	response := discoverInputs(t, inputClient(t, svc), "protected-plan")
+	if !proto.Equal(pathInput(inputTask(t, response, agent.TaskPhase_TASK_PHASE_COMPILE), protected.Name), protected) {
+		t.Fatal("operation-owned protection lost")
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(source))
+	if strings.Contains(response.String(), digest) {
+		t.Fatal("other task emitted plain hash of protected source")
 	}
 }

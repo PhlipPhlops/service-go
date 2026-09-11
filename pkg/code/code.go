@@ -38,7 +38,7 @@ import (
 // Container mode silently falls through to native because the Docker
 // image is plugin-specific and not known at the Code layer.
 func (c *Code) runTool(ctx context.Context, dir, cmd string, args ...string) ([]byte, error) {
-	env := c.Service.ActiveEnv
+	env := c.Service.CurrentRunnerEnvironment()
 	if env == nil {
 		var rctx *basev0.RuntimeContext
 		if c.Service.Base != nil && c.Service.Base.Runtime != nil {

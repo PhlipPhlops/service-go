@@ -142,7 +142,7 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 	// Expose the underlying RunnerEnvironment on the shared Service so
 	// Code / Tooling / commands route spawns through the same mode —
 	// without reaching into the Go-specific wrapper.
-	s.Service.ActiveEnv = env.Env()
+	s.Service.SetRunnerEnvironment(env.Env())
 	return nil
 }
 
@@ -308,13 +308,11 @@ func (s *Runtime) Build(ctx context.Context, req *runtimev0.BuildRequest) (*runt
 
 	s.Infof("running go build")
 
-	envs, err := s.EnvironmentVariables.All()
+	invocation, err := s.Service.GoBuildInvocation(ctx, req.Target, s.RunnerEnvironment)
 	if err != nil {
-		return s.Runtime.BuildErrorf(err, "getting environment variables")
+		return s.Runtime.BuildErrorf(err, "resolving build invocation")
 	}
-
-	opts := golanghelpers.BuildOptions{Target: req.Target}
-	output, runErr := golanghelpers.RunGoBuild(ctx, s.RunnerEnvironment, s.Service.SourceLocation, envs, opts)
+	output, runErr := invocation.Build(ctx)
 	// Compress before the output reaches the model. On failure especially, the
 	// compiler errors are the biggest and most useful payload — and because a
 	// gRPC error drops the response body, the compressed errors must travel in
