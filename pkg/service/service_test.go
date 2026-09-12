@@ -74,7 +74,7 @@ func TestGetAgentInformationGeneric(t *testing.T) {
 	if len(info.Protocols) != 0 {
 		t.Errorf("generic go should advertise no protocols, got %d", len(info.Protocols))
 	}
-	if versions := info.GetEffectiveInputsVersions(); len(versions) != 0 {
-		t.Errorf("effective-input discovery should not be advertised, got versions %v", versions)
+	if versions := info.GetEffectiveInputsVersions(); len(versions) != 1 || versions[0] != 1 {
+		t.Errorf("expected effective-input discovery schema v1, got versions %v", versions)
 	}
 }

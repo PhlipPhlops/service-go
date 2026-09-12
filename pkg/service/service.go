@@ -52,6 +52,21 @@ type Service struct {
 	// Nil before Runtime.Init — call-sites fall back to a fresh
 	// NativeEnvironment for pre-init ops (typically Code file-level).
 	ActiveEnv runners.RunnerEnvironment
+
+	// InputPlans is configured by the operation owner before serving RPCs.
+	InputPlans EffectiveInputPlanner
+}
+
+func (s *Service) CurrentRunnerEnvironment() runners.RunnerEnvironment {
+	s.sourceMu.RLock()
+	defer s.sourceMu.RUnlock()
+	return s.ActiveEnv
+}
+
+func (s *Service) SetRunnerEnvironment(env runners.RunnerEnvironment) {
+	s.sourceMu.Lock()
+	defer s.sourceMu.Unlock()
+	s.ActiveEnv = env
 }
 
 // CurrentSourceLocation returns the source root currently shared by Code,
@@ -117,10 +132,11 @@ func (s *Service) GetAgentInformation(_ context.Context, _ *agentv0.AgentInforma
 			Nix:    true,
 			Docker: true,
 		},
-		Toolchains: []agentv0.Toolchain_Type{agentv0.Toolchain_GO},
-		Languages:  []agentv0.Language_Type{agentv0.Language_GO},
-		ReadMe:     "Generic Go service. Specializations add protocols.",
-		Validation: ValidationCapabilities(),
+		Toolchains:              []agentv0.Toolchain_Type{agentv0.Toolchain_GO},
+		Languages:               []agentv0.Language_Type{agentv0.Language_GO},
+		ReadMe:                  "Generic Go service. Specializations add protocols.",
+		Validation:              ValidationCapabilities(),
+		EffectiveInputsVersions: []uint32{1},
 	}.Build(), nil
 }
 
