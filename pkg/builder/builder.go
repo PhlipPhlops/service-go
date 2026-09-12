@@ -124,23 +124,29 @@ func (s *Builder) Sync(ctx context.Context, _ *builderv0.SyncRequest) (*builderv
 	return s.Builder.SyncResponse()
 }
 
+// BuildCapabilities advertises that every build this agent serves honors the
+// caller's Buildx selection. The guarantee is unconditional because the agent
+// only emits recipes and the caller owns execution. It is read-only and must
+// answer before Load, so it prepares nothing and touches no request state.
 func (s *Builder) BuildCapabilities(context.Context, *builderv0.BuildCapabilitiesRequest) (*builderv0.BuildCapabilitiesResponse, error) {
+	defer s.Wool.Catch()
 	return &builderv0.BuildCapabilitiesResponse{BuildxSelection: true}, nil
 }
 
-// Build produces a Docker image. When the CLI supplies an output directory it
-// owns the docker build: the agent renders the recipe (Dockerfile + context)
-// into that directory and returns a DockerBuildPlan the CLI builds multi-arch
-// with buildx. With no output directory the agent builds the image in-process
-// via the shared go builder helper.
+// Build renders a Docker build recipe into the caller-owned output directory and
+// returns the DockerBuildPlan describing it. The CLI is the only image build
+// executor in codefly: this agent never invokes docker or buildx, so a request
+// without an output directory is refused up front rather than falling back to an
+// in-agent build. The refusal happens before any preparation so a rejected
+// request leaves no rendered templates or other side effects behind.
 func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
-	if out := req.GetOutputDirectory(); out != "" {
-		return s.buildRecipe(ctx, req, out)
+	out := req.GetOutputDirectory()
+	if out == "" {
+		return nil, fmt.Errorf("BuildRequest.output_directory is required: this agent only produces Docker build recipes and never executes an image build")
 	}
-	return golanghelpers.BuildGoDocker(ctx, s.Base.Builder, req, s.Location,
-		s.cfg.Requirements, s.cfg.BuilderFS, s.cfg.GoVersion, s.cfg.AlpineVersion)
+	return s.buildRecipe(ctx, req, out)
 }
 
 // buildRecipe renders the Dockerfile, dockerignore, and Go source into the
@@ -175,7 +181,7 @@ func (s *Builder) buildRecipe(ctx context.Context, req *builderv0.BuildRequest, 
 		Context:      ".",
 		Dockerignore: "builder/dockerignore",
 		Image:        image.FullName(),
-		Platforms:    []string{"linux/amd64", "linux/arm64"},
+		Platforms:    services.RecipeBuildPlatforms(),
 	}
 	plan, err := services.BuildDockerBuildPlan(outputDir, []*builderv0.DockerBuildRecipe{recipe})
 	if err != nil {

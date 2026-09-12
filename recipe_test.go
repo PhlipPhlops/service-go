@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -282,51 +281,33 @@ func TestBuildxRecipeOverGRPC(t *testing.T) {
 	}
 }
 
-func TestLegacyBuildxOverGRPC(t *testing.T) {
-	if os.Getenv("CODEFLY_TEST_BUILDX") != "1" {
-		t.Skip("set CODEFLY_TEST_BUILDX=1 to build with Docker")
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
-	defer cancel()
-	run := func(ctx context.Context, args ...string) string {
-		t.Helper()
-		output, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
-		if err != nil {
-			t.Fatalf("docker %v: %v\n%s", args, err, output)
-		}
-		return strings.TrimSpace(string(output))
-	}
-	name := fmt.Sprintf("codefly-go-test-%d", time.Now().UnixNano())
-	run(ctx, "buildx", "create", "--name", name, "--driver", "docker-container", "--bootstrap")
-	t.Cleanup(func() {
-		cleanup, stop := context.WithTimeout(context.Background(), time.Minute)
-		defer stop()
-		run(cleanup, "buildx", "rm", name)
-	})
-	t.Setenv("BUILDX_BUILDER", "must-not-use-ambient-builder")
-	t.Setenv("CODEFLY_BUILD_PLATFORM", "linux/amd64")
+// TestBuildRejectsMissingOutputDirectory proves the agent never executes an
+// image build. A BuildRequest without an output directory is refused outright
+// instead of falling back to an in-agent docker build, and the refusal lands
+// before any preparation, so nothing is rendered into the service tree.
+func TestBuildRejectsMissingOutputDirectory(t *testing.T) {
 	b, _ := loadedBuilder(t)
 	client := grpcBuilderClient(t, b)
-	response, err := client.Build(ctx, &builderv0.BuildRequest{BuildContext: &builderv0.BuildContext{Kind: &builderv0.BuildContext_DockerBuildContext{DockerBuildContext: &builderv0.DockerBuildContext{DockerRepository: name, BuildxBuilder: name}}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.GetState().GetState() != builderv0.BuildStatus_SUCCESS {
-		t.Fatalf("Build failed: %v", response.GetState())
-	}
-	if response.GetResult().GetDockerBuildPlan() != nil {
-		t.Fatal("legacy build returned a recipe")
-	}
-	if response.GetBuildxBuilder() != name {
-		t.Fatalf("builder acknowledgement = %q, want %q", response.GetBuildxBuilder(), name)
-	}
-	image := b.Base.DockerImage(&builderv0.DockerBuildContext{DockerRepository: name}).FullName()
-	t.Cleanup(func() {
-		cleanup, stop := context.WithTimeout(context.Background(), time.Minute)
-		defer stop()
-		run(cleanup, "image", "rm", image)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	response, err := client.Build(ctx, &builderv0.BuildRequest{
+		BuildContext: &builderv0.BuildContext{
+			Kind: &builderv0.BuildContext_DockerBuildContext{
+				DockerBuildContext: &builderv0.DockerBuildContext{DockerRepository: "registry.example.com"},
+			},
+		},
 	})
-	if got := run(ctx, "image", "inspect", "--format", "{{.Architecture}}", image); got != "amd64" {
-		t.Fatalf("image architecture = %q, want amd64", got)
+	if err == nil {
+		t.Fatalf("expected a refusal, got %v", response)
+	}
+	if !strings.Contains(err.Error(), "output_directory") {
+		t.Errorf("refusal must name the missing field, got %v", err)
+	}
+	// The in-process path used to render builder/Dockerfile into the service
+	// directory before building, so an untouched tree is the evidence that the
+	// request was refused ahead of any preparation.
+	if _, statErr := os.Stat(filepath.Join(b.Location, "builder")); !os.IsNotExist(statErr) {
+		t.Errorf("refused build prepared the service tree: %v", statErr)
 	}
 }
