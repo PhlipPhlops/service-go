@@ -22,7 +22,7 @@ func readPolicyYAML(t *testing.T, path string, target any) {
 	}
 }
 
-func TestDependencyUpdatesIsolateMajors(t *testing.T) {
+func TestDependencyUpdatesGroupEveryEcosystem(t *testing.T) {
 	var config struct {
 		Updates []struct {
 			Ecosystem string `yaml:"package-ecosystem"`
@@ -41,24 +41,21 @@ func TestDependencyUpdatesIsolateMajors(t *testing.T) {
 			t.Errorf("unexpected update location: %s %s", update.Ecosystem, update.Directory)
 		}
 		delete(wantDirectories, update.Ecosystem)
-		if update.Limit < 2 {
-			t.Errorf("%s: a pending major must leave room for routine updates", update.Ecosystem)
+		if update.Limit != 1 {
+			t.Errorf("%s: a week must yield one pull request, not %d", update.Ecosystem, update.Limit)
 		}
-		owners := map[string]string{}
+		if len(update.Groups) != 1 {
+			t.Errorf("%s: every dependency belongs to one group, found %d", update.Ecosystem, len(update.Groups))
+		}
 		for name, group := range update.Groups {
 			if !slices.Equal(group.Patterns, []string{"*"}) {
 				t.Errorf("%s/%s must cover all dependencies", update.Ecosystem, name)
 			}
-			for _, kind := range group.Types {
-				if previous := owners[kind]; previous != "" {
-					t.Errorf("%s: %s overlaps groups %s and %s", update.Ecosystem, kind, previous, name)
-				}
-				owners[kind] = name
+			// `update-types` only matches semver bumps, so a digest-pinned
+			// image would fall out of the group into a pull request of its own.
+			if len(group.Types) != 0 {
+				t.Errorf("%s/%s: update-types drops digest updates out of the group: %v", update.Ecosystem, name, group.Types)
 			}
-		}
-		if owners["major"] == "" || owners["minor"] == "" || owners["patch"] == "" ||
-			owners["major"] == owners["minor"] || owners["major"] == owners["patch"] {
-			t.Errorf("%s: major updates must be covered separately from minor/patch: %v", update.Ecosystem, owners)
 		}
 	}
 	if len(wantDirectories) != 0 {
