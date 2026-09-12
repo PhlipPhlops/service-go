@@ -238,6 +238,12 @@ func TestBuildxRecipeOverGRPC(t *testing.T) {
 	for _, cached := range []bool{false, true} {
 		t.Run(fmt.Sprintf("cache=%t", cached), func(t *testing.T) {
 			b, _ := loadedBuilder(t)
+			t.Setenv("PATH", t.TempDir())
+			for _, executable := range []string{"docker", "buildx"} {
+				if _, err := exec.LookPath(executable); err == nil {
+					t.Fatalf("%s unexpectedly on PATH", executable)
+				}
+			}
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			out := filepath.Join(t.TempDir(), "recipe")
@@ -290,51 +296,44 @@ func TestBuildxRecipeOverGRPC(t *testing.T) {
 	}
 }
 
-func TestLegacyBuildxOverGRPC(t *testing.T) {
-	if os.Getenv("CODEFLY_TEST_BUILDX") != "1" {
-		t.Skip("set CODEFLY_TEST_BUILDX=1 to build with Docker")
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
-	defer cancel()
-	run := func(ctx context.Context, args ...string) string {
-		t.Helper()
-		output, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
-		if err != nil {
-			t.Fatalf("docker %v: %v\n%s", args, err, output)
+func TestBuildRejectsMissingOrRelativeDestinationOverGRPC(t *testing.T) {
+	for _, selection := range []string{"", "explicit", "cache-selected"} {
+		for _, destination := range []string{"", "relative"} {
+			t.Run(fmt.Sprintf("builder=%s/destination=%s", selection, destination), func(t *testing.T) {
+				b, _ := loadedBuilder(t)
+				t.Setenv("PATH", t.TempDir())
+				original := filepath.Join(b.Location, "builder", "Dockerfile")
+				write(t, original, "original recipe")
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				docker := &builderv0.DockerBuildContext{DockerRepository: "registry.example.com", BuildxBuilder: selection}
+				if selection == "cache-selected" {
+					docker.Cache = &builderv0.BuildCacheOptions{Backend: "registry", Scope: "test/myservice", Exports: []string{"registry.example.com/cache"}}
+				}
+				request := &builderv0.BuildRequest{OutputDirectory: destination, BuildContext: &builderv0.BuildContext{Kind: &builderv0.BuildContext_DockerBuildContext{DockerBuildContext: docker}}}
+				response, err := grpcBuilderClient(t, b).Build(ctx, request)
+				if err != nil {
+					if !strings.Contains(err.Error(), "output_directory") {
+						t.Fatalf("unexpected error: %v", err)
+					}
+				} else if response.GetState().GetState() != builderv0.BuildStatus_ERROR || !strings.Contains(response.GetState().GetMessage(), "output_directory") {
+					t.Fatalf("expected destination rejection, got %v", response)
+				}
+				contents, err := os.ReadFile(original)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(contents) != "original recipe" {
+					t.Fatal("rejected request overwrote existing recipe")
+				}
+				entries, err := os.ReadDir(filepath.Dir(original))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(entries) != 1 {
+					t.Fatal("rejected request prepared builder files")
+				}
+			})
 		}
-		return strings.TrimSpace(string(output))
-	}
-	name := fmt.Sprintf("codefly-go-test-%d", time.Now().UnixNano())
-	run(ctx, "buildx", "create", "--name", name, "--driver", "docker-container", "--bootstrap")
-	t.Cleanup(func() {
-		cleanup, stop := context.WithTimeout(context.Background(), time.Minute)
-		defer stop()
-		run(cleanup, "buildx", "rm", name)
-	})
-	t.Setenv("BUILDX_BUILDER", "must-not-use-ambient-builder")
-	t.Setenv("CODEFLY_BUILD_PLATFORM", "linux/amd64")
-	b, _ := loadedBuilder(t)
-	client := grpcBuilderClient(t, b)
-	response, err := client.Build(ctx, &builderv0.BuildRequest{BuildContext: &builderv0.BuildContext{Kind: &builderv0.BuildContext_DockerBuildContext{DockerBuildContext: &builderv0.DockerBuildContext{DockerRepository: name, BuildxBuilder: name}}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.GetState().GetState() != builderv0.BuildStatus_SUCCESS {
-		t.Fatalf("Build failed: %v", response.GetState())
-	}
-	if response.GetResult().GetDockerBuildPlan() != nil {
-		t.Fatal("legacy build returned a recipe")
-	}
-	if response.GetBuildxBuilder() != name {
-		t.Fatalf("builder acknowledgement = %q, want %q", response.GetBuildxBuilder(), name)
-	}
-	image := b.Base.DockerImage(&builderv0.DockerBuildContext{DockerRepository: name}).FullName()
-	t.Cleanup(func() {
-		cleanup, stop := context.WithTimeout(context.Background(), time.Minute)
-		defer stop()
-		run(cleanup, "image", "rm", image)
-	})
-	if got := run(ctx, "image", "inspect", "--format", "{{.Architecture}}", image); got != "amd64" {
-		t.Fatalf("image architecture = %q, want amd64", got)
 	}
 }
