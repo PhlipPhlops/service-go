@@ -66,7 +66,7 @@ func (s *Service) DiscoverEffectiveInputs(ctx context.Context, req *agent.GetEff
 		}
 	}
 	// The current agent/settings cannot attest to historical discovery semantics.
-	if req.Revision != "" {
+	if req.GetRevision() != "" {
 		for _, task := range response.Tasks {
 			task.Inputs = []*agent.EffectiveInput{unresolved(agent.EffectiveInputKind_EFFECTIVE_INPUT_KIND_CONFIGURATION, "historical-discovery")}
 		}
