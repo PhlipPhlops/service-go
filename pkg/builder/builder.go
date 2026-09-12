@@ -128,19 +128,14 @@ func (s *Builder) BuildCapabilities(context.Context, *builderv0.BuildCapabilitie
 	return &builderv0.BuildCapabilitiesResponse{BuildxSelection: true}, nil
 }
 
-// Build produces a Docker image. When the CLI supplies an output directory it
-// owns the docker build: the agent renders the recipe (Dockerfile + context)
-// into that directory and returns a DockerBuildPlan the CLI builds multi-arch
-// with buildx. With no output directory the agent builds the image in-process
-// via the shared go builder helper.
+// Build emits a recipe for the CLI to build and publish.
 func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
-	if out := req.GetOutputDirectory(); out != "" {
-		return s.buildRecipe(ctx, req, out)
+	if req.GetOutputDirectory() == "" {
+		return s.Builder.BuildError(fmt.Errorf("BuildRequest.output_directory is required for image recipes"))
 	}
-	return golanghelpers.BuildGoDocker(ctx, s.Base.Builder, req, s.Location,
-		s.cfg.Requirements, s.cfg.BuilderFS, s.cfg.GoVersion, s.cfg.AlpineVersion)
+	return s.buildRecipe(ctx, req, req.GetOutputDirectory())
 }
 
 // buildRecipe renders the Dockerfile, dockerignore, and Go source into the
