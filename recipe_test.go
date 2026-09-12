@@ -66,13 +66,21 @@ func loadedBuilder(t *testing.T) (*gobuilder.Builder, context.Context) {
 // DockerBuildPlan that re-verifies against the on-disk tree.
 func TestBuildEmitsRecipePlan(t *testing.T) {
 	b, ctx := loadedBuilder(t)
+	client := grpcBuilderClient(t, b)
+	capabilities, err := client.BuildCapabilities(ctx, &builderv0.BuildCapabilitiesRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !capabilities.GetBuildxSelection() {
+		t.Fatal("recipe producer must support caller-owned Buildx selection")
+	}
 	out := filepath.Join(t.TempDir(), "recipe")
 
-	resp, err := b.Build(ctx, &builderv0.BuildRequest{
+	resp, err := client.Build(ctx, &builderv0.BuildRequest{
 		OutputDirectory: out,
 		BuildContext: &builderv0.BuildContext{
 			Kind: &builderv0.BuildContext_DockerBuildContext{
-				DockerBuildContext: &builderv0.DockerBuildContext{DockerRepository: "registry.example.com"},
+				DockerBuildContext: &builderv0.DockerBuildContext{DockerRepository: "registry.example.com", BuildxBuilder: "recipe-only-no-such-builder", Cache: &builderv0.BuildCacheOptions{Backend: "registry", Scope: "test/service", Imports: []string{"registry.example.com/cache"}}},
 			},
 		},
 	})
