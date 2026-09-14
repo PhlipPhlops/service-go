@@ -452,20 +452,84 @@ func TestSourceInventoryIsNotImageCoverage(t *testing.T) {
 	}
 }
 
+// TestImageSBOMRefusesUnpinnedSubjects covers the substitution this agent cannot
+// otherwise detect. A subject naming only a tag is inventoried from whatever the
+// registry serves when the scan runs — for a build loaded locally and never
+// pushed, that is a different image, or a previously pushed one. Nothing
+// downstream catches it: a tag-derived subject carries no digest, so neither the
+// shared helper's mismatch check nor ValidateCoverage has anything to compare,
+// and a stale inventory would be reported as coverage for the built image.
+func TestImageSBOMRefusesUnpinnedSubjects(t *testing.T) {
+	b, ctx := loadedBuilder(t)
+	// No scanner toolchain: a refusal must come from the missing digest, not
+	// from a scan that was attempted and happened to fail.
+	t.Setenv("PATH", t.TempDir())
+
+	reference := "registry.example.com/codefly/myservice:1.0.0"
+	resp, err := b.SBOM(ctx, &builderv0.SBOMRequest{
+		Scope: builderv0.SBOMScope_SBOM_SCOPE_IMAGE,
+		Subjects: []*builderv0.ImageSubject{{
+			Reference: reference,
+			Platform:  "linux/amd64",
+			Role:      "app",
+			Service:   "myservice",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("SBOM: %v", err)
+	}
+	if state := resp.GetState().GetState(); state != builderv0.SBOMStatus_ERROR {
+		t.Fatalf("unpinned subject state = %s, want ERROR", state)
+	}
+	if scope := resp.GetScope(); scope != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+		t.Errorf("scope = %s, want image", scope)
+	}
+	if images := resp.GetImages(); len(images) != 0 {
+		t.Errorf("refused request carries %d inventories", len(images))
+	}
+	message := resp.GetState().GetMessage()
+	if !strings.Contains(message, "immutable digest") || !strings.Contains(message, reference) {
+		t.Errorf("refusal does not name the unpinned subject and why: %q", message)
+	}
+}
+
+// TestImageSBOMAcceptsSubjectsPinnedByReference proves the pin check reads the
+// reference as well as the digest field, so a caller that pins the reference
+// itself reaches the scanner rather than being refused.
+func TestImageSBOMAcceptsSubjectsPinnedByReference(t *testing.T) {
+	b, ctx := loadedBuilder(t)
+	t.Setenv("PATH", t.TempDir())
+
+	resp, err := b.SBOM(ctx, &builderv0.SBOMRequest{
+		Scope: builderv0.SBOMScope_SBOM_SCOPE_IMAGE,
+		Subjects: []*builderv0.ImageSubject{{
+			Reference: "registry.example.com/codefly/myservice@sha256:" + strings.Repeat("a", 64),
+			Platform:  "linux/amd64",
+			Role:      "app",
+			Service:   "myservice",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("SBOM: %v", err)
+	}
+	if message := resp.GetState().GetMessage(); strings.Contains(message, "immutable digest") {
+		t.Errorf("reference-pinned subject was refused as unpinned: %q", message)
+	}
+}
+
 // TestImageSBOMScanFailuresStayImageScoped proves a failed scan propagates as an
-// image-scope error rather than partial or fabricated coverage. The reserved
-// .invalid TLD resolves nowhere, so the scan fails the same way whether or not a
-// scanner toolchain is installed.
+// image-scope error rather than partial or fabricated coverage. The scanner
+// toolchain is removed from PATH so the failure is the same one in every
+// environment, with no network lookup to depend on.
 func TestImageSBOMScanFailuresStayImageScoped(t *testing.T) {
-	b, ctx, _ := emittedPlan(t)
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
+	b, ctx := loadedBuilder(t)
+	t.Setenv("PATH", t.TempDir())
 
 	digest := "sha256:" + strings.Repeat("a", 64)
 	resp, err := b.SBOM(ctx, &builderv0.SBOMRequest{
 		Scope: builderv0.SBOMScope_SBOM_SCOPE_IMAGE,
 		Subjects: []*builderv0.ImageSubject{{
-			Reference: "registry.invalid/codefly/myservice@" + digest,
+			Reference: "registry.example.com/codefly/myservice@" + digest,
 			Digest:    digest,
 			Platform:  "linux/amd64",
 			Role:      "app",
@@ -476,7 +540,7 @@ func TestImageSBOMScanFailuresStayImageScoped(t *testing.T) {
 		t.Fatalf("SBOM: %v", err)
 	}
 	if state := resp.GetState().GetState(); state != builderv0.SBOMStatus_ERROR {
-		t.Fatalf("unreachable image state = %s, want ERROR", state)
+		t.Fatalf("unscannable image state = %s, want ERROR", state)
 	}
 	if scope := resp.GetScope(); scope != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
 		t.Errorf("scope = %s, want image", scope)
