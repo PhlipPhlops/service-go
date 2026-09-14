@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/codefly-dev/core/agents/services"
+	"github.com/codefly-dev/core/agents/services/sbom"
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 
@@ -335,5 +336,155 @@ func TestBuildRejectsMissingOrRelativeDestinationOverGRPC(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// emittedPlan drives Build the way the CLI does and returns the recipe plan the
+// agent hands back — the only description of its images the agent owns.
+func emittedPlan(t *testing.T) (*gobuilder.Builder, context.Context, *builderv0.DockerBuildPlan) {
+	t.Helper()
+	b, ctx := loadedBuilder(t)
+	resp, err := b.Build(ctx, &builderv0.BuildRequest{
+		OutputDirectory: filepath.Join(t.TempDir(), "recipe"),
+		BuildContext: &builderv0.BuildContext{
+			Kind: &builderv0.BuildContext_DockerBuildContext{
+				DockerBuildContext: &builderv0.DockerBuildContext{DockerRepository: "registry.example.com"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	plan := resp.GetResult().GetDockerBuildPlan()
+	if plan == nil {
+		t.Fatalf("expected a plan, got state %v message %q", resp.GetState().GetState(), resp.GetState().GetMessage())
+	}
+	return b, ctx, plan
+}
+
+// TestImageSBOMRequiresCallerSuppliedSubjects drives the SBOM RPC under image
+// scope with no subjects. This agent emits a recipe and never runs buildx, so it
+// holds no digest to inventory: the honest answer is a precondition failure, not
+// an unsupported operation and not a no-image claim, because the service really
+// does ship an image.
+func TestImageSBOMRequiresCallerSuppliedSubjects(t *testing.T) {
+	b, _ := loadedBuilder(t)
+	client := grpcBuilderClient(t, b)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	resp, err := client.SBOM(ctx, &builderv0.SBOMRequest{Scope: builderv0.SBOMScope_SBOM_SCOPE_IMAGE})
+	if err != nil {
+		t.Fatalf("SBOM: %v", err)
+	}
+	if state := resp.GetState().GetState(); state != builderv0.SBOMStatus_ERROR {
+		t.Fatalf("state = %s, want ERROR: %s", state, resp.GetState().GetMessage())
+	}
+	// An image failure reported without image scope reads as a source inventory,
+	// which hides the cause behind a scope complaint.
+	if scope := resp.GetScope(); scope != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+		t.Errorf("scope = %s, want image", scope)
+	}
+	if code := resp.GetState().GetFailure().GetCode(); code != basev0.FailureCode_FAILURE_CODE_PRECONDITION_FAILED {
+		t.Errorf("failure code = %s, want precondition failed", code)
+	}
+	if reason := resp.GetNoImageReason(); reason != builderv0.NoImageReason_NO_IMAGE_REASON_UNSPECIFIED {
+		t.Errorf("no-image reason = %s, but this service ships an image", reason)
+	}
+	if images := resp.GetImages(); len(images) != 0 {
+		t.Errorf("failed image scope carries %d inventories", len(images))
+	}
+}
+
+// TestImageSBOMCoverageDerivesFromTheEmittedRecipe checks the agent's own plan
+// through the shared conformance helper: every shipped platform is its own
+// subject, and the subjects-required failure never passes as coverage.
+func TestImageSBOMCoverageDerivesFromTheEmittedRecipe(t *testing.T) {
+	b, ctx, plan := emittedPlan(t)
+
+	expected := sbom.ExpectedFromBuildPlan("myservice", plan)
+	if len(expected) != 2 {
+		t.Fatalf("expected one subject per shipped platform, got %d", len(expected))
+	}
+	for i, platform := range []string{"linux/amd64", "linux/arm64"} {
+		if got := expected[i].GetPlatform(); got != platform {
+			t.Errorf("subject %d platform = %q, want %q", i, got, platform)
+		}
+		if got := expected[i].GetRole(); got != "app" {
+			t.Errorf("subject %d role = %q, want the recipe name", i, got)
+		}
+		if got := expected[i].GetService(); got != "myservice" {
+			t.Errorf("subject %d service = %q", i, got)
+		}
+	}
+
+	unsatisfied, err := b.SBOM(ctx, &builderv0.SBOMRequest{Scope: builderv0.SBOMScope_SBOM_SCOPE_IMAGE})
+	if err != nil {
+		t.Fatalf("SBOM: %v", err)
+	}
+	validation := sbom.ValidateCoverage(expected, unsatisfied)
+	if validation == nil {
+		t.Fatal("a precondition failure passed coverage validation")
+	}
+	if !strings.Contains(validation.Error(), "does not build its own images") {
+		t.Errorf("coverage failure does not name its cause: %v", validation)
+	}
+}
+
+// TestSourceInventoryIsNotImageCoverage proves the unchanged source path still
+// answers an unset scope, and that its module graph cannot stand in for evidence
+// about the shipped image.
+func TestSourceInventoryIsNotImageCoverage(t *testing.T) {
+	b, ctx, plan := emittedPlan(t)
+
+	resp, err := b.SBOM(ctx, &builderv0.SBOMRequest{})
+	if err != nil {
+		t.Fatalf("SBOM: %v", err)
+	}
+	if state := resp.GetState().GetState(); state != builderv0.SBOMStatus_COMPLETE {
+		t.Fatalf("source SBOM state = %s: %s", state, resp.GetState().GetMessage())
+	}
+	if scope := resp.GetScope(); scope != builderv0.SBOMScope_SBOM_SCOPE_SOURCE {
+		t.Errorf("unset scope = %s, want source", scope)
+	}
+	if sbom.ValidateCoverage(sbom.ExpectedFromBuildPlan("myservice", plan), resp) == nil {
+		t.Fatal("a module inventory passed as image coverage")
+	}
+}
+
+// TestImageSBOMScanFailuresStayImageScoped proves a failed scan propagates as an
+// image-scope error rather than partial or fabricated coverage. The reserved
+// .invalid TLD resolves nowhere, so the scan fails the same way whether or not a
+// scanner toolchain is installed.
+func TestImageSBOMScanFailuresStayImageScoped(t *testing.T) {
+	b, ctx, _ := emittedPlan(t)
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	digest := "sha256:" + strings.Repeat("a", 64)
+	resp, err := b.SBOM(ctx, &builderv0.SBOMRequest{
+		Scope: builderv0.SBOMScope_SBOM_SCOPE_IMAGE,
+		Subjects: []*builderv0.ImageSubject{{
+			Reference: "registry.invalid/codefly/myservice@" + digest,
+			Digest:    digest,
+			Platform:  "linux/amd64",
+			Role:      "app",
+			Service:   "myservice",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("SBOM: %v", err)
+	}
+	if state := resp.GetState().GetState(); state != builderv0.SBOMStatus_ERROR {
+		t.Fatalf("unreachable image state = %s, want ERROR", state)
+	}
+	if scope := resp.GetScope(); scope != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+		t.Errorf("scope = %s, want image", scope)
+	}
+	if images := resp.GetImages(); len(images) != 0 {
+		t.Errorf("failed scan carries %d inventories", len(images))
+	}
+	if resp.GetState().GetMessage() == "" {
+		t.Error("failed scan reports no diagnostics")
 	}
 }
