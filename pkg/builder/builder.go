@@ -237,16 +237,45 @@ func (s *Builder) Audit(ctx context.Context, req *builderv0.AuditRequest) (*buil
 	return s.Builder.AuditResponse(req, result.Findings, result.Outdated, result.Tool, result.Language)
 }
 
-// SBOM is inherited by every Go specialization and inventories the exact
-// GOWORK-disabled module graph selected by go.mod/go.sum.
-func (s *Builder) SBOM(ctx context.Context, _ *builderv0.SBOMRequest) (*builderv0.SBOMResponse, error) {
+// SBOM is inherited by every Go specialization. Source scope inventories the
+// exact GOWORK-disabled module graph selected by go.mod/go.sum. Image scope
+// inventories a shipped image instead — its OS packages included, which a
+// module graph says nothing about. Go images are built by whoever executes the
+// emitted recipe, so the digests to scan arrive as caller-supplied subjects;
+// asked for image scope with none, the shared helper reports the precondition
+// failure rather than passing the module graph off as image coverage.
+func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builderv0.SBOMResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
+	if req.GetScope() == builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+		if subject := unpinnedImageSubject(req.GetSubjects()); subject != nil {
+			return s.Builder.SBOMImageError(fmt.Errorf("image subject %q names no immutable digest: a tag resolves to whatever the registry serves when the scan runs, which need not be the image this build produced; supply the digest the build resolved", subject.GetReference()))
+		}
+		return s.Builder.SBOMImages(ctx, req.GetSubjects(), sbom.SourceRegistry)
+	}
 	result, err := sbom.Golang(ctx, s.Service.SourceLocation)
 	if err != nil {
 		return s.Builder.SBOMError(err)
 	}
 	return s.Builder.SBOMResponse(result.Bom, result.Tool, result.Language, result.SHA256)
+}
+
+// unpinnedImageSubject returns the first subject that names no immutable image.
+// Evidence is only ever compared against a digest the caller already holds, so a
+// subject carrying nothing but a tag would be inventoried from whatever the
+// registry serves at scan time and reported as coverage for the built image
+// without anything detecting the substitution.
+func unpinnedImageSubject(subjects []*builderv0.ImageSubject) *builderv0.ImageSubject {
+	for _, subject := range subjects {
+		if strings.HasPrefix(subject.GetDigest(), "sha256:") {
+			continue
+		}
+		if _, reference, pinned := strings.Cut(subject.GetReference(), "@"); pinned && strings.HasPrefix(reference, "sha256:") {
+			continue
+		}
+		return subject
+	}
+	return nil
 }
 
 // Package emits portable Go binaries and release-bound CycloneDX evidence.
