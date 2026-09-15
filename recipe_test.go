@@ -362,6 +362,24 @@ func emittedPlan(t *testing.T) (*gobuilder.Builder, context.Context, *builderv0.
 	return b, ctx, plan
 }
 
+// resolvedFromPlan stands in for the digests a caller reads back from the buildx
+// run it drives; this agent only emits the recipe, so a test never has real ones.
+func resolvedFromPlan(t *testing.T, plan *builderv0.DockerBuildPlan) []sbom.ResolvedImage {
+	t.Helper()
+	var resolved []sbom.ResolvedImage
+	for _, recipe := range plan.GetRecipes() {
+		for i, platform := range recipe.GetPlatforms() {
+			resolved = append(resolved, sbom.ResolvedImage{
+				Recipe:   recipe.GetName(),
+				Platform: platform,
+				Digest:   fmt.Sprintf("sha256:%064d", i),
+				Source:   sbom.SourceRegistry,
+			})
+		}
+	}
+	return resolved
+}
+
 // TestImageSBOMRequiresCallerSuppliedSubjects drives the SBOM RPC under image
 // scope with no subjects. This agent emits a recipe and never runs buildx, so it
 // holds no digest to inventory: the honest answer is a precondition failure, not
@@ -402,7 +420,10 @@ func TestImageSBOMRequiresCallerSuppliedSubjects(t *testing.T) {
 func TestImageSBOMCoverageDerivesFromTheEmittedRecipe(t *testing.T) {
 	b, ctx, plan := emittedPlan(t)
 
-	expected := sbom.ExpectedFromBuildPlan("myservice", plan)
+	expected, err := sbom.ExpectedFromBuildPlan("myservice", plan, resolvedFromPlan(t, plan))
+	if err != nil {
+		t.Fatalf("ExpectedFromBuildPlan: %v", err)
+	}
 	if len(expected) != 2 {
 		t.Fatalf("expected one subject per shipped platform, got %d", len(expected))
 	}
@@ -422,7 +443,7 @@ func TestImageSBOMCoverageDerivesFromTheEmittedRecipe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SBOM: %v", err)
 	}
-	validation := sbom.ValidateCoverage(expected, unsatisfied)
+	validation := sbom.ValidateCoverage("myservice", expected, unsatisfied)
 	if validation == nil {
 		t.Fatal("a precondition failure passed coverage validation")
 	}
@@ -447,7 +468,11 @@ func TestSourceInventoryIsNotImageCoverage(t *testing.T) {
 	if scope := resp.GetScope(); scope != builderv0.SBOMScope_SBOM_SCOPE_SOURCE {
 		t.Errorf("unset scope = %s, want source", scope)
 	}
-	if sbom.ValidateCoverage(sbom.ExpectedFromBuildPlan("myservice", plan), resp) == nil {
+	expected, err := sbom.ExpectedFromBuildPlan("myservice", plan, resolvedFromPlan(t, plan))
+	if err != nil {
+		t.Fatalf("ExpectedFromBuildPlan: %v", err)
+	}
+	if sbom.ValidateCoverage("myservice", expected, resp) == nil {
 		t.Fatal("a module inventory passed as image coverage")
 	}
 }

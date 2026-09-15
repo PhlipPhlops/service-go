@@ -161,6 +161,11 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.EnvironmentVariables.SetRuntimeContext(s.Runtime.RuntimeContext)
 	s.NetworkMappings = req.ProposedNetworkMappings
 
+	// Init reaches the service in every test dependency mode; the Start that
+	// reaches a service under test is often a policy barrier carrying nothing.
+	s.Runtime.SetFixtureFromInit(req.GetFixture())
+	s.Runtime.SetOverridesFromInit(req.GetOverrides())
+
 	// Service's own configuration: configurations/<env>/*.env (incl. *.secret.env)
 	// → the service's own configured values injected into its environment. Without
 	// this a service never receives its own config (e.g. secrets via
@@ -253,8 +258,8 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	if err != nil {
 		return s.Runtime.StartError(err)
 	}
-	s.EnvironmentVariables.SetFixture(req.Fixture)
-	s.EnvironmentVariables.AddOverrides(req.GetOverrides())
+	s.Runtime.SetFixtureFromStart(req.GetFixture())
+	s.Runtime.SetOverridesFromStart(req.GetOverrides())
 
 	// The service must outlive the Start RPC, but intentional teardown must be
 	// visible to the supervisor before the process is stopped.

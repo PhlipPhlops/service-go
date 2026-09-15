@@ -251,7 +251,7 @@ func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builde
 		if subject := unpinnedImageSubject(req.GetSubjects()); subject != nil {
 			return s.Builder.SBOMImageError(fmt.Errorf("image subject %q names no immutable digest: a tag resolves to whatever the registry serves when the scan runs, which need not be the image this build produced; supply the digest the build resolved", subject.GetReference()))
 		}
-		return s.Builder.SBOMImages(ctx, req.GetSubjects(), sbom.SourceRegistry)
+		return s.Builder.SBOMImages(ctx, req.GetSubjects())
 	}
 	result, err := sbom.Golang(ctx, s.Service.SourceLocation)
 	if err != nil {
