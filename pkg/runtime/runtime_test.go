@@ -104,6 +104,79 @@ func TestEventHandlerRequestsCorrectLifecycleStage(t *testing.T) {
 	}
 }
 
+// TestInitRecordsFixtureAndOverrides pins the values a service under test
+// observes. Its Start is a no-op sequencing barrier under
+// TEST_DEPENDENCY_MODE_START_DEPENDENCIES and never runs at all under NONE, so a
+// process only ever sees these if Init records them.
+func TestInitRecordsFixtureAndOverrides(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/init\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	svc := goservice.New(&resources.Agent{Kind: "codefly:service", Name: "go"})
+	svc.SourceLocation = dir
+	runner, err := golanghelpers.NewNativeGoRunner(context.Background(), dir, ".")
+	if err != nil {
+		t.Fatalf("new native runner: %v", err)
+	}
+	runner.WithWorkspace(false)
+	rt := goruntime.New(svc)
+	rt.RunnerEnvironment = runner
+
+	if _, err := rt.Init(context.Background(), &runtimev0.InitRequest{
+		Fixture:   "dev-admin",
+		Overrides: map[string]string{"CODEFLY__API_CONSUMES": "billing"},
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	envs, err := rt.EnvironmentVariables.All()
+	if err != nil {
+		t.Fatalf("environment variables: %v", err)
+	}
+	if got := envValue(t, envs, "CODEFLY__FIXTURE"); got != "dev-admin" {
+		t.Errorf("CODEFLY__FIXTURE = %q, want the InitRequest selection", got)
+	}
+	if got := envValue(t, envs, "CODEFLY__API_CONSUMES"); got != "billing" {
+		t.Errorf("CODEFLY__API_CONSUMES = %q, want the InitRequest override", got)
+	}
+
+	// An agent process is reused across invocations, so Init is authoritative:
+	// a second invocation selecting nothing must not keep serving the first
+	// one's values.
+	if _, err := rt.Init(context.Background(), &runtimev0.InitRequest{}); err != nil {
+		t.Fatalf("second Init: %v", err)
+	}
+	envs, err = rt.EnvironmentVariables.All()
+	if err != nil {
+		t.Fatalf("environment variables: %v", err)
+	}
+	for _, key := range []string{"CODEFLY__FIXTURE", "CODEFLY__API_CONSUMES"} {
+		if got := envValue(t, envs, key); got != "" {
+			t.Errorf("%s = %q after an invocation carrying none", key, got)
+		}
+	}
+}
+
+// envValue returns the single value recorded for key, failing when a key was
+// recorded twice: a process holding two entries for one variable resolves it by
+// whichever the exec layer happens to keep.
+func envValue(t *testing.T, envs []*resources.EnvironmentVariable, key string) string {
+	t.Helper()
+	var found []string
+	for _, env := range envs {
+		if env.Key == key {
+			found = append(found, env.ValueAsString())
+		}
+	}
+	if len(found) > 1 {
+		t.Fatalf("%s recorded %d times: %v", key, len(found), found)
+	}
+	if len(found) == 0 {
+		return ""
+	}
+	return found[0]
+}
+
 func TestRuntimeHonorsTypedSelectionWithStructuredResult(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/selection\n\ngo 1.24\n"), 0o644); err != nil {
