@@ -15,8 +15,9 @@ func TestCopyGoContextPreservesModes(t *testing.T) {
 	mustWrite(t, filepath.Join(src, "go.mod"), "module x\n", 0o644)
 	mustWrite(t, filepath.Join(src, "scripts", "build.sh"), "#!/bin/sh\n", 0o755)
 
-	dst := filepath.Join(t.TempDir(), "code")
-	if err := copyGoContext(src, dst); err != nil {
+	output := t.TempDir()
+	dst := filepath.Join(output, "code")
+	if err := copyGoContext(src, dst, output); err != nil {
 		t.Fatalf("copyGoContext: %v", err)
 	}
 
@@ -31,6 +32,52 @@ func TestCopyGoContextPreservesModes(t *testing.T) {
 		if info.Mode().Perm() != wantMode {
 			t.Errorf("%s mode = %o, want %o", rel, info.Mode().Perm(), wantMode)
 		}
+	}
+}
+
+// TestCopyGoContextSkipsOutputDirectory reproduces the source-dir "." layout,
+// where the recipe is written inside the tree being copied. The walk must leave
+// its own output alone: copying it would nest the recipe inside itself until the
+// path outruns the filesystem's name limit.
+func TestCopyGoContextSkipsOutputDirectory(t *testing.T) {
+	src := t.TempDir()
+	mustWrite(t, filepath.Join(src, "go.mod"), "module x\n", 0o644)
+	mustWrite(t, filepath.Join(src, "internal", "app.go"), "package internal\n", 0o644)
+
+	output := filepath.Join(src, "builder")
+	mustWrite(t, filepath.Join(output, "builder", "Dockerfile"), "FROM scratch\n", 0o644)
+	dst := filepath.Join(output, "code")
+
+	if err := copyGoContext(src, dst, output); err != nil {
+		t.Fatalf("copyGoContext: %v", err)
+	}
+
+	for _, rel := range []string{"go.mod", "internal/app.go"} {
+		if _, err := os.Stat(filepath.Join(dst, rel)); err != nil {
+			t.Errorf("expected %s in the recipe context: %v", rel, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dst, "builder")); !os.IsNotExist(err) {
+		t.Errorf("recipe output copied into its own context: %v", err)
+	}
+}
+
+// TestCopyGoContextCopiesSourceSharingTheOutputName proves the skip is decided
+// by directory identity rather than by name: a source directory that happens to
+// be called builder is part of the service and must reach the recipe, or the
+// inventory would silently ship an image missing code the service builds.
+func TestCopyGoContextCopiesSourceSharingTheOutputName(t *testing.T) {
+	src := t.TempDir()
+	mustWrite(t, filepath.Join(src, "builder", "builder.go"), "package builder\n", 0o644)
+
+	output := t.TempDir()
+	dst := filepath.Join(output, "code")
+	if err := copyGoContext(src, dst, output); err != nil {
+		t.Fatalf("copyGoContext: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dst, "builder", "builder.go")); err != nil {
+		t.Errorf("source package named like the recipe output was dropped: %v", err)
 	}
 }
 

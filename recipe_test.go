@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +43,13 @@ func loadedBuilder(t *testing.T) (*gobuilder.Builder, context.Context) {
 	write(t, filepath.Join(ws, "service.codefly.yaml"), serviceConfig)
 	write(t, filepath.Join(ws, "code", "go.mod"), "module myservice\n\ngo 1.26\n")
 	write(t, filepath.Join(ws, "code", "main.go"), "package main\n\nfunc main() {}\n")
+	return loadBuilderAt(t, ws)
+}
 
+// loadBuilderAt loads a Builder against a workspace a caller has already laid
+// out, so a test can pick the service's source layout.
+func loadBuilderAt(t *testing.T, ws string) (*gobuilder.Builder, context.Context) {
+	t.Helper()
 	svc := goservice.New(agent)
 	b := gobuilder.New(svc, gobuilder.BuildConfig{
 		FactoryFS:    factoryFS,
@@ -182,6 +189,67 @@ func TestBuildRecipeSkipsSymlinks(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(out, "code", "link.mod")); !os.IsNotExist(err) {
 		t.Errorf("symlink leaked into recipe tree: %v", err)
+	}
+}
+
+// TestBuildRecipeAtSourceRootExcludesItsOwnOutput drives the layout the CLI
+// hands a service declaring source-dir ".": the sources are rooted at the
+// service directory, which is also where the recipe is written. The build must
+// emit each source file once instead of copying its own growing output back
+// into the context until the path outruns the filesystem's name limit.
+func TestBuildRecipeAtSourceRootExcludesItsOwnOutput(t *testing.T) {
+	ws := t.TempDir()
+	write(t, filepath.Join(ws, "service.codefly.yaml"), serviceConfig+"spec:\n  source-dir: \".\"\n")
+	write(t, filepath.Join(ws, "go.mod"), "module myservice\n\ngo 1.26\n")
+	write(t, filepath.Join(ws, "main.go"), "package main\n\nfunc main() {}\n")
+
+	b, ctx := loadBuilderAt(t, ws)
+	if b.SourceLocation != ws {
+		t.Fatalf("source location = %q, want the service root %q", b.SourceLocation, ws)
+	}
+	out := filepath.Join(ws, "builder")
+
+	resp, err := b.Build(ctx, &builderv0.BuildRequest{
+		OutputDirectory: out,
+		BuildContext: &builderv0.BuildContext{
+			Kind: &builderv0.BuildContext_DockerBuildContext{
+				DockerBuildContext: &builderv0.DockerBuildContext{DockerRepository: "registry.example.com"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	plan := resp.GetResult().GetDockerBuildPlan()
+	if plan == nil {
+		t.Fatalf("expected a plan, got state %v message %q",
+			resp.GetState().GetState(), resp.GetState().GetMessage())
+	}
+	if err := services.VerifyDockerBuildPlan(out, plan); err != nil {
+		t.Fatalf("plan does not verify against its tree: %v", err)
+	}
+
+	var files []string
+	if err := filepath.WalkDir(filepath.Join(out, "code"), func(p string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(filepath.Join(out, "code"), p)
+		if err != nil {
+			return err
+		}
+		files = append(files, rel)
+		return nil
+	}); err != nil {
+		t.Fatalf("walk recipe context: %v", err)
+	}
+	slices.Sort(files)
+	want := []string{"go.mod", "main.go", "service.codefly.yaml"}
+	if !slices.Equal(files, want) {
+		t.Errorf("recipe context = %v, want each source once: %v", files, want)
 	}
 }
 
