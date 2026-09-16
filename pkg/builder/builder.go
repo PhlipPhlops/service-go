@@ -160,7 +160,7 @@ func (s *Builder) buildRecipe(ctx context.Context, req *builderv0.BuildRequest, 
 		return s.Builder.BuildError(err)
 	}
 
-	if err = copyGoContext(s.SourceLocation, filepath.Join(outputDir, "code")); err != nil {
+	if err = copyGoContext(s.SourceLocation, filepath.Join(outputDir, "code"), outputDir); err != nil {
 		return s.Builder.BuildError(err)
 	}
 
@@ -183,10 +183,31 @@ func (s *Builder) buildRecipe(ctx context.Context, req *builderv0.BuildRequest, 
 // copyGoContext copies the Go source tree at src into dst, preserving file
 // modes. Symlinks and other irregular files are skipped: the recipe inventory
 // rejects symlinks outright, so a copied symlink would fail plan generation.
-func copyGoContext(src, dst string) error {
+//
+// output is the recipe directory the walk must never descend into. A service
+// with source-dir "." has its sources rooted at the service directory, where
+// the CLI also puts the recipe, so the walk would otherwise reach its own
+// output and copy the growing recipe into itself until the path outruns the
+// filesystem's name limit. Directory identity, not a path prefix, decides: the
+// caller-selected recipe directory is skipped, no directory that merely shares
+// its name is.
+func copyGoContext(src, dst, output string) error {
+	outputInfo, err := os.Stat(output)
+	if err != nil {
+		return err
+	}
 	return filepath.WalkDir(src, func(p string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if entry.IsDir() {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if os.SameFile(info, outputInfo) {
+				return filepath.SkipDir
+			}
 		}
 		rel, err := filepath.Rel(src, p)
 		if err != nil {
