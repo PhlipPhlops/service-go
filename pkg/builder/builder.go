@@ -495,7 +495,7 @@ func packageCrossGoBinary(ctx context.Context, source, destination string, targe
 		SourceDir: source,
 		Image: &resources.DockerImage{
 			Name: "ghcr.io/goreleaser/goreleaser-cross",
-			Tag:  "v1.26.4",
+			Tag:  "v1.27.0",
 		},
 		PreferredBackend: companion.BackendDocker,
 	})

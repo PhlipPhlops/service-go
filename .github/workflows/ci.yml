@@ -21,3 +21,7 @@ jobs:
         run: go test ./...
       - name: Vet
         run: go vet ./...
+      - name: Package real CGO for native and loader platforms
+        env:
+          SERVICE_GO_PACKAGE_TESTS: required
+        run: go test -race -count=1 -v -timeout 15m ./pkg/builder -run TestPackageRealCGO
