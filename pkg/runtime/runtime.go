@@ -187,7 +187,13 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
-	// No endpoint env vars — go has no gRPC/REST
+	// Plain Go services may declare HTTP or other endpoints without a protocol
+	// specialization. Carry their own resolved endpoints just as we carry the
+	// dependency endpoints at Start; the SDK must not guess a bind address.
+	err = s.EnvironmentVariables.AddEndpoints(ctx, req.ProposedNetworkMappings, resources.NetworkAccessFromRuntimeContext(s.Runtime.RuntimeContext))
+	if err != nil {
+		return s.Runtime.InitErrorf(err, "adding service endpoints")
+	}
 
 	if s.RunnerEnvironment == nil {
 		err = s.CreateRunnerEnvironment(ctx)
