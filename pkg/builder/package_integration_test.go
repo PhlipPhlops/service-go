@@ -15,6 +15,7 @@ import (
 
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"github.com/codefly-dev/core/runners/dockerrun"
+	"github.com/codefly-dev/core/runners/recoveryscope"
 )
 
 // This fixture requires both the current Go language version and a real C
@@ -33,7 +34,7 @@ func TestPackageRealCGO(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(dockerrun.ContainerRecoveryScopeEnvironment, os.Getenv(dockerrun.ContainerRecoveryScopeEnvironment))
+	t.Setenv(recoveryscope.EnvironmentVariable, os.Getenv(recoveryscope.EnvironmentVariable))
 	if err := dockerrun.SetContainerRecoveryScope(scope); err != nil {
 		t.Fatal(err)
 	}
