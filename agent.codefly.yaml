@@ -2,3 +2,7 @@ publisher: codefly.dev
 kind: codefly:service
 name: go
 version: 0.0.53
+source:
+  directory: .
+  agent: self
+  bootstrap: [./bootstrap-agent]

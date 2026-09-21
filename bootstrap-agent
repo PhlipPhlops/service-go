@@ -1,0 +1,8 @@
+#!/bin/sh
+# Builds this agent for a host that has no codefly.dev/go release installed yet.
+# Core's source inspection links real tree-sitter grammars, so the executable
+# must keep CGO enabled to parse anything.
+set -eu
+
+CGO_ENABLED=1 GOOS="$CODEFLY_AGENT_OS" GOARCH="$CODEFLY_AGENT_ARCH" \
+	go build -o "$CODEFLY_AGENT_OUTPUT" .
