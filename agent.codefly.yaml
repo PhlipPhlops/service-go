@@ -1,7 +1,7 @@
 publisher: codefly.dev
 kind: codefly:service
 name: go
-version: 0.0.56
+version: 0.0.57
 release:
   owner: workflow
   workflow: releaser.yml
