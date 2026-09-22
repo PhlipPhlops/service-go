@@ -43,9 +43,13 @@ func TestPackageRealCGO(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, content := range map[string]string{
-		"go.mod":  "module example.com/cgo-package-regression\n\ngo 1.27.0\n",
-		"main.go": "package main\n/*\nstatic int answer(void) { return 42; }\n*/\nimport \"C\"\nimport \"fmt\"\nfunc main() { fmt.Println(int(C.answer())) }\n",
+		"go.mod":            "module example.com/cgo-package-regression\n\ngo 1.27.0\n",
+		"value.go":          "package regression\nconst Value = 42\n",
+		"cmd/agent/main.go": "package main\n/*\nstatic int answer(void) { return 42; }\n*/\nimport \"C\"\nimport (\"fmt\"; regression \"example.com/cgo-package-regression\")\nfunc main() { if int(C.answer()) != regression.Value { panic(\"wrong C result\") }; fmt.Println(regression.Value) }\n",
 	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(source, name)), 0700); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filepath.Join(source, name), []byte(content), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -64,7 +68,7 @@ func TestPackageRealCGO(t *testing.T) {
 		seen[identity] = true
 		t.Run(identity, func(t *testing.T) {
 			destination := filepath.Join(root, strings.ReplaceAll(identity, "/", "-"))
-			if err := packageGoBinary(ctx, source, destination, target); err != nil {
+			if err := packageGoBinary(ctx, filepath.Join(source, "cmd", "agent"), destination, target); err != nil {
 				t.Fatal(err)
 			}
 			info, err := os.Stat(destination)

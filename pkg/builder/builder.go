@@ -442,6 +442,10 @@ func validPackageTargetComponent(value string) bool {
 }
 
 func packageGoBinary(ctx context.Context, source, destination string, target *builderv0.PackageTarget) error {
+	moduleRoot, entry, err := resolvePackageSource(ctx, source, target)
+	if err != nil {
+		return err
+	}
 	temporary, err := os.CreateTemp(filepath.Dir(destination), ".codefly-go-package-*")
 	if err != nil {
 		return fmt.Errorf("prepare package output: %w", err)
@@ -453,10 +457,10 @@ func packageGoBinary(ctx context.Context, source, destination string, target *bu
 	}
 	defer os.Remove(temporaryPath)
 	if target.GetOs() == runtime.GOOS && target.GetArchitecture() == runtime.GOARCH {
-		if err := packageNativeGoBinary(ctx, source, temporaryPath, target); err != nil {
+		if err := packageNativeGoBinary(ctx, moduleRoot, entry, temporaryPath, target); err != nil {
 			return err
 		}
-	} else if err := packageCrossGoBinary(ctx, source, temporaryPath, target); err != nil {
+	} else if err := packageCrossGoBinary(ctx, moduleRoot, entry, temporaryPath, target); err != nil {
 		return err
 	}
 	if err := os.Chmod(temporaryPath, 0o755); err != nil {
@@ -468,8 +472,8 @@ func packageGoBinary(ctx context.Context, source, destination string, target *bu
 	return nil
 }
 
-func packageNativeGoBinary(ctx context.Context, source, destination string, target *builderv0.PackageTarget) error {
-	command := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", destination, ".")
+func packageNativeGoBinary(ctx context.Context, source, entry, destination string, target *builderv0.PackageTarget) error {
+	command := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", destination, entry)
 	command.Dir = source
 	command.Env = append(os.Environ(),
 		"CGO_ENABLED=1",
@@ -504,7 +508,7 @@ func crossCGOToolchainFor(identity string) (crossCGOToolchain, bool) {
 	}
 }
 
-func packageCrossGoBinary(ctx context.Context, source, destination string, target *builderv0.PackageTarget) (resultErr error) {
+func packageCrossGoBinary(ctx context.Context, source, entry, destination string, target *builderv0.PackageTarget) (resultErr error) {
 	identity := target.GetOs() + "/" + target.GetArchitecture()
 	toolchain, supported := crossCGOToolchainFor(identity)
 	if !supported {
@@ -544,7 +548,7 @@ func packageCrossGoBinary(ctx context.Context, source, destination string, targe
 		return fmt.Errorf("initialize go package %s CGO toolchain: %w", identity, err)
 	}
 
-	process, err := runner.NewProcess("go", "build", "-trimpath", "-o", destination, ".")
+	process, err := runner.NewProcess("go", "build", "-trimpath", "-o", destination, entry)
 	if err != nil {
 		return fmt.Errorf("create go package %s process: %w", identity, err)
 	}
