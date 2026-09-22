@@ -2,6 +2,9 @@ publisher: codefly.dev
 kind: codefly:service
 name: go
 version: 0.0.53
+release:
+  owner: workflow
+  workflow: releaser.yml
 source:
   directory: .
   agent: self
