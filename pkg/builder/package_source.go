@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/version"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,25 @@ import (
 
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 )
+
+// Use Go's module/toolchain selection on the source, just as the native build
+// does. The cross image supplies C compilers, not the module's Go version.
+func resolvePackageGoToolchain(ctx context.Context, source string) (string, error) {
+	command := exec.CommandContext(ctx, "go", "env", "GOVERSION")
+	command.Dir = source
+	command.Env = append(os.Environ(), "GOWORK=off")
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	output, err := command.Output()
+	if err != nil {
+		return "", fmt.Errorf("resolve Go package toolchain: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	selected := strings.TrimSpace(string(output))
+	if !version.IsValid(selected) {
+		return "", fmt.Errorf("Go package toolchain %q cannot be selected for a cross build", selected)
+	}
+	return selected, nil
+}
 
 // Resolve the declared package with Go itself. Cross builds must mount the
 // enclosing module, not just a nested main directory with no go.mod or imports.

@@ -514,6 +514,10 @@ func packageCrossGoBinary(ctx context.Context, source, entry, destination string
 	if !supported {
 		return fmt.Errorf("go package %s: no CGO cross toolchain; supported cross targets are darwin/amd64, darwin/arm64, linux/amd64, linux/arm64", identity)
 	}
+	goToolchain, err := resolvePackageGoToolchain(ctx, source)
+	if err != nil {
+		return err
+	}
 
 	runner, err := companion.NewCompanionRunner(ctx, companion.CompanionOpts{
 		Name:      fmt.Sprintf("go-package-%s-%s-%d", target.GetOs(), target.GetArchitecture(), time.Now().UnixNano()),
@@ -559,9 +563,10 @@ func packageCrossGoBinary(ctx context.Context, source, entry, destination string
 		resources.Env("CC", toolchain.cc),
 		resources.Env("CXX", toolchain.cxx),
 		resources.Env("GOWORK", "off"),
-		resources.Env("GOTOOLCHAIN", "local"),
+		resources.Env("GOTOOLCHAIN", goToolchain),
 		resources.Env("HOME", "/tmp/codefly-home"),
 		resources.Env("GOCACHE", "/tmp/codefly-go-build"),
+		resources.Env("GOMODCACHE", "/tmp/codefly-go-mod"),
 	)
 	var output bytes.Buffer
 	process.WithOutput(&output)
