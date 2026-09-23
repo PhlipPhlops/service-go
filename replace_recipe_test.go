@@ -135,6 +135,58 @@ func TestBuildRecipeCarriesLocalReplacement(t *testing.T) {
 	}
 }
 
+// TestBuildRecipeCarryIsIdempotentInAReusedDirectory holds the layout the CLI
+// actually hands the agent: one recipe directory per service, reused from build
+// to build. The source copy only ever adds to it, so a carry left by an earlier
+// emission outlives the directive that asked for it — the second emission must
+// replace it and rewrite the same go.mod, not trip over its own output.
+func TestBuildRecipeCarryIsIdempotentInAReusedDirectory(t *testing.T) {
+	repository, service := replaceFixture(t, "../../lib")
+	writeLibrary(t, filepath.Join(repository, "services", "lib"))
+
+	b, ctx := loadBuilderAt(t, service)
+	out := filepath.Join(t.TempDir(), "recipe")
+	request := &builderv0.BuildRequest{
+		OutputDirectory: out,
+		BuildContext: &builderv0.BuildContext{
+			Kind: &builderv0.BuildContext_DockerBuildContext{
+				DockerBuildContext: &builderv0.DockerBuildContext{DockerRepository: "registry.example.com"},
+			},
+		},
+	}
+	stale := filepath.Join(out, "code", "_replace", "services", "gone", "leftover.go")
+	for attempt := 1; attempt <= 2; attempt++ {
+		resp, err := b.Build(ctx, request)
+		if err != nil {
+			t.Fatalf("Build %d: %v", attempt, err)
+		}
+		if resp.GetState().GetState() != builderv0.BuildStatus_SUCCESS {
+			t.Fatalf("build %d state = %v, message = %q", attempt, resp.GetState().GetState(), resp.GetState().GetMessage())
+		}
+		rewritten, err := os.ReadFile(filepath.Join(out, "code", "go.mod"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(rewritten), "replace mylib => ./_replace/services/lib") {
+			t.Fatalf("emission %d did not point go.mod at the carried replacement:\n%s", attempt, rewritten)
+		}
+		if strings.Contains(string(rewritten), "replace mylib => ../../lib") {
+			t.Fatalf("emission %d left the unresolvable directive in go.mod:\n%s", attempt, rewritten)
+		}
+		if _, err := os.Stat(filepath.Join(out, "code", "_replace", "services", "lib", "lib.go")); err != nil {
+			t.Fatalf("emission %d lost the carried module: %v", attempt, err)
+		}
+		if attempt == 1 {
+			// A carry a previous emission left behind, for a directive that is
+			// no longer in the go.mod.
+			write(t, stale, "package gone\n")
+		}
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("a carry no directive asks for survived re-emission: %v", err)
+	}
+}
+
 // TestBuildRecipeRefusesReplacementOutsideRepository proves a replacement that
 // leaves the repository is reported, naming the directive. Copying it would put
 // one machine's filesystem into an image; skipping it silently would build the

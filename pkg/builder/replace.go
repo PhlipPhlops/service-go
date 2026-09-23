@@ -80,6 +80,17 @@ func carryLocalReplacements(src, dst, output string) error {
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, directive(local[0]))
 	}
+	// The recipe directory is reused between builds and the source copy only
+	// ever adds to it, so a carry an earlier emission left behind would
+	// outlive the directive that asked for it. It is output, not source:
+	// replace it wholesale, and refuse only when the module's own tree
+	// occupies the name.
+	if _, err := os.Lstat(filepath.Join(src, carryDirectory)); err == nil {
+		return fmt.Errorf("%s cannot be carried: the module's own tree occupies %s", directive(local[0]), carryDirectory)
+	}
+	if err := os.RemoveAll(filepath.Join(dst, carryDirectory)); err != nil {
+		return err
+	}
 
 	carried := false
 	for _, replace := range local {
@@ -110,14 +121,14 @@ func carryLocalReplacements(src, dst, output string) error {
 			return err
 		}
 		destination := filepath.Join(dst, carryDirectory, relative)
-		if _, err := os.Lstat(destination); err == nil {
-			return fmt.Errorf("%s would land on %s, which the module already occupies", directive(replace), filepath.Join(carryDirectory, relative))
-		}
 		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 			return err
 		}
-		if err := copyGoContext(resolved, destination, output); err != nil {
-			return fmt.Errorf("carry %s into the build context: %w", directive(replace), err)
+		// Two directives may name one directory; carrying it once is enough.
+		if _, err := os.Lstat(destination); err != nil {
+			if err := copyGoContext(resolved, destination, output); err != nil {
+				return fmt.Errorf("carry %s into the build context: %w", directive(replace), err)
+			}
 		}
 		if err := parsed.AddReplace(replace.Old.Path, replace.Old.Version,
 			"./"+carryDirectory+"/"+filepath.ToSlash(relative), ""); err != nil {
