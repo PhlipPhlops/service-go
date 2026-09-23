@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/codefly-dev/core/agents/helpers/code"
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/resources"
 	golanghelpers "github.com/codefly-dev/core/runners/golang"
@@ -124,6 +125,10 @@ func TestInitRecordsFixtureAndOverrides(t *testing.T) {
 	rt.RunnerEnvironment = runner
 
 	if _, err := rt.Init(context.Background(), &runtimev0.InitRequest{
+		ProposedNetworkMappings: []*basev0.NetworkMapping{{
+			Endpoint:  &basev0.Endpoint{Module: "example", Service: "worker", Name: "http", Api: "http"},
+			Instances: []*basev0.NetworkInstance{{Address: "http://127.0.0.1:12345", Access: resources.NewNativeNetworkAccess()}},
+		}},
 		Fixture:   "dev-admin",
 		Overrides: map[string]string{"CODEFLY__API_CONSUMES": "billing"},
 	}); err != nil {
@@ -132,6 +137,9 @@ func TestInitRecordsFixtureAndOverrides(t *testing.T) {
 	envs, err := rt.EnvironmentVariables.All()
 	if err != nil {
 		t.Fatalf("environment variables: %v", err)
+	}
+	if got := envValue(t, envs, "CODEFLY__ENDPOINT__EXAMPLE__WORKER__HTTP__HTTP"); got != "http://127.0.0.1:12345" {
+		t.Errorf("own endpoint = %q; declared address must reach the user process", got)
 	}
 	if got := envValue(t, envs, "CODEFLY__FIXTURE"); got != "dev-admin" {
 		t.Errorf("CODEFLY__FIXTURE = %q, want the InitRequest selection", got)
