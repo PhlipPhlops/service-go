@@ -117,6 +117,12 @@ func TestBuildEmitsRecipePlan(t *testing.T) {
 	if recipe.GetContext() != "." {
 		t.Errorf("context = %q", recipe.GetContext())
 	}
+	if recipe.GetContextRoot() != builderv0.RecipeContextRoot_RECIPE_CONTEXT_ROOT_OUTPUT {
+		t.Fatalf("context root = %v; rewritten sources must build from output_directory", recipe.GetContextRoot())
+	}
+	if plan.GetContractVersion() != services.DockerBuildRecipeContextContractVersion {
+		t.Fatalf("context-root recipe requires v4, got %q", plan.GetContractVersion())
+	}
 	if got := recipe.GetPlatforms(); len(got) != 2 || got[0] != "linux/amd64" || got[1] != "linux/arm64" {
 		t.Errorf("platforms = %v", got)
 	}

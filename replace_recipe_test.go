@@ -91,6 +91,9 @@ func TestBuildRecipeCarriesLocalReplacement(t *testing.T) {
 	if resp.GetState().GetState() != builderv0.BuildStatus_SUCCESS {
 		t.Fatalf("build state = %v, message = %q", resp.GetState().GetState(), resp.GetState().GetMessage())
 	}
+	if root := resp.GetResult().GetDockerBuildPlan().GetRecipes()[0].GetContextRoot(); root != builderv0.RecipeContextRoot_RECIPE_CONTEXT_ROOT_OUTPUT {
+		t.Fatalf("carried replacements require the emitted context, got %v", root)
+	}
 
 	codeContext := filepath.Join(out, "code")
 	for _, rel := range []string{"go.mod", "main.go", "_replace/services/lib/go.mod", "_replace/services/lib/lib.go"} {
