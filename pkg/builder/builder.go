@@ -160,7 +160,14 @@ func (s *Builder) buildRecipe(ctx context.Context, req *builderv0.BuildRequest, 
 		return s.Builder.BuildError(err)
 	}
 
-	if err = copyGoContext(s.SourceLocation, filepath.Join(outputDir, "code"), outputDir); err != nil {
+	codeContext := filepath.Join(outputDir, "code")
+	if err = copyGoContext(s.SourceLocation, codeContext, outputDir); err != nil {
+		return s.Builder.BuildError(err)
+	}
+	// A module that replaces another by filesystem path resolves that path
+	// against its own directory, which the context is: carry the replacement in
+	// beside it so the builder stage resolves what the host resolves.
+	if err = carryLocalReplacements(s.SourceLocation, codeContext, outputDir); err != nil {
 		return s.Builder.BuildError(err)
 	}
 
