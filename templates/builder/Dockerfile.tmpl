@@ -10,7 +10,17 @@ COPY code/ ./code/
 WORKDIR /app/code
 ARG TARGETOS
 ARG TARGETARCH
-RUN go mod download && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags='-w -s -extldflags "-static"' -o app
+
+# Private Go modules. GOPRIVATE is a build argument the CLI sets from the host's
+# own GOPRIVATE, so it reaches the toolchain here exactly as it does on the host:
+# those module paths bypass the public proxy and checksum database and are
+# fetched with git. The credential git needs is a BuildKit secret the CLI mounts
+# as /root/.netrc on the dependency download step only. The credential is never
+# a build argument, an ENV or a layer, and the mount is optional: a build with
+# no private module needs no secret and renders the same recipe.
+ARG GOPRIVATE
+
+RUN --mount=type=secret,id=netrc,target=/root/.netrc,required=false go mod download && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags='-w -s -extldflags "-static"' -o app
 
 # Final stage
 FROM alpine:3.24
